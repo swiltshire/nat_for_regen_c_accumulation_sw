@@ -93,13 +93,13 @@ Adjust these parameters before each run.
 #         Completes in minutes on a laptop. Use this to verify the fitting
 #         pipeline and inspect example curves before a full production run.
 # FALSE → full production run over all tiles.
-test_mode    <- TRUE
+test_mode    <- FALSE
 test_crop_n  <- 150   # pixels per side when test_mode = TRUE
 
 # ── Scenario ──────────────────────────────────────────────────────────────────
 # Set to "future" or "hist" — controls which input directory is used.
 # To process both scenarios back-to-back, see Section 6.
-scenario <- "future"
+scenario <- "hist"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Notebook-relative root of the project (two levels up from cr_calc/).
@@ -144,15 +144,15 @@ cat(sprintf("Cores available: %d | Strategy: %s\n", n_cores, parallel_strategy))
 # Maximum RAM (GB) terra may use per process when chunking raster I/O.
 # - "tile" mode:  budget = total_RAM / n_cores  (each worker reads one tile)
 # - "pixel" mode: budget = ~total_RAM * 0.75    (one tile at a time, all cores)
-# SageMaker ml.r5.24xlarge (768 GB): set terra_mem_gb <- 500 in "pixel" mode.
-terra_mem_gb <- 8
+# SageMaker ml.c5.24xlarge (192 GB): terra_mem_gb <- 120 in "pixel" mode.
+terra_mem_gb <- 120
 terraOptions(memmax = terra_mem_gb)
 
 # ── S3 output ─────────────────────────────────────────────────────────────────
 # TRUE  → after all tiles complete, sync local outputs to S3 (Section 9).
-#          Requires the AWS CLI and IAM permissions (automatic on SageMaker).
+#          Requires rclone configured (see setup/fetch_input_data.Rmd).
 # FALSE → outputs stay local only (laptop / smoke test).
-save_to_s3 <- FALSE
+save_to_s3 <- TRUE
 
 s3_output_dir <- sprintf(
   "s3://sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/%s/outputs",
