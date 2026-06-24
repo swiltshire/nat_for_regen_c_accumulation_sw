@@ -40,8 +40,9 @@ gcs_bucket <- "carbon-accumulation-modeling-bucket"
 gcs_prefix <- "rf_outputs"           # path inside bucket to the scenario dirs
 
 # S3 destination -------------------------------------------------------------
-s3_bucket  <- "your-s3-bucket-name"  # replace with your bucket
-s3_prefix  <- "nat_for_regen/data/inputs"
+# Inputs are stored under the scenario subdirectory alongside outputs.
+s3_bucket  <- "sagemaker-gst-stage.sharing"
+s3_prefix  <- "serge-wiltshire/nat_for_regen_c_accumulation_data"
 
 # Scenarios ------------------------------------------------------------------
 scenarios  <- c("future", "hist")
@@ -108,14 +109,14 @@ connection errors on a slower link.
 ```{bash gcs-to-s3}
 GCS_BUCKET="carbon-accumulation-modeling-bucket"
 GCS_PREFIX="rf_outputs"
-S3_BUCKET="your-s3-bucket-name"
-S3_PREFIX="nat_for_regen/data/inputs"
+S3_BUCKET="sagemaker-gst-stage.sharing"
+S3_PREFIX="serge-wiltshire/nat_for_regen_c_accumulation_data"
 
 for SCENARIO in future hist; do
   echo "=== Transferring ${SCENARIO} ==="
   rclone copy \
     "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/" \
-    "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/" \
+    "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/inputs/" \
     --transfers 20 \
     --progress \
     --stats-one-line
@@ -127,12 +128,12 @@ Verify file counts match the source:
 ```{bash verify-s3}
 GCS_BUCKET="carbon-accumulation-modeling-bucket"
 GCS_PREFIX="rf_outputs"
-S3_BUCKET="your-s3-bucket-name"
-S3_PREFIX="nat_for_regen/data/inputs"
+S3_BUCKET="sagemaker-gst-stage.sharing"
+S3_PREFIX="serge-wiltshire/nat_for_regen_c_accumulation_data"
 
 for SCENARIO in future hist; do
-  N_GCS=$(rclone ls "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/" | wc -l)
-  N_S3=$(rclone  ls "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/" | wc -l)
+  N_GCS=$(rclone ls "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/"         | wc -l)
+  N_S3=$(rclone  ls "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/inputs/"  | wc -l)
   echo "${SCENARIO} -- GCS: ${N_GCS} files | S3: ${N_S3} files"
 done
 ```
@@ -158,8 +159,8 @@ git clone git@github.com:swiltshire/nat_for_regen_c_accumulation_sw.git
 start of each session is safe and fast when nothing has changed.
 
 ```{bash s3-to-sagemaker}
-S3_BUCKET="your-s3-bucket-name"
-S3_PREFIX="nat_for_regen/data/inputs"
+S3_BUCKET="sagemaker-gst-stage.sharing"
+S3_PREFIX="serge-wiltshire/nat_for_regen_c_accumulation_data"
 LOCAL_INPUTS="/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw/data/inputs"
 
 mkdir -p "${LOCAL_INPUTS}"
@@ -167,7 +168,7 @@ mkdir -p "${LOCAL_INPUTS}"
 for SCENARIO in future hist; do
   echo "=== Syncing ${SCENARIO} from S3 ==="
   aws s3 sync \
-    "s3://${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/" \
+    "s3://${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/inputs/" \
     "${LOCAL_INPUTS}/${SCENARIO}/" \
     --no-progress
   echo "Done: ${SCENARIO}"
@@ -186,21 +187,4 @@ for (scenario in scenarios) {
 }
 ```
 
----
 
-## 4. Sync outputs back to S3
-
-Run this after the CR fitting job completes, before terminating the instance.
-SageMaker instance storage is ephemeral - outputs not synced to S3 will be lost.
-
-```{bash upload-outputs}
-S3_BUCKET="your-s3-bucket-name"
-LOCAL_OUTPUTS="/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw/data/outputs"
-
-aws s3 sync \
-  "${LOCAL_OUTPUTS}/" \
-  "s3://${S3_BUCKET}/nat_for_regen/data/outputs/" \
-  --no-progress
-
-echo "Outputs synced to S3."
-```

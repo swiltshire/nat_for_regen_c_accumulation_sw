@@ -147,6 +147,18 @@ cat(sprintf("Cores available: %d | Strategy: %s\n", n_cores, parallel_strategy))
 # SageMaker ml.r5.24xlarge (768 GB): set terra_mem_gb <- 500 in "pixel" mode.
 terra_mem_gb <- 8
 terraOptions(memmax = terra_mem_gb)
+
+# ── S3 output ─────────────────────────────────────────────────────────────────
+# TRUE  → each tile's output GeoTIFFs are uploaded to S3 immediately after
+#          being written locally. Requires the AWS CLI and appropriate IAM
+#          permissions (automatic on SageMaker with a configured role).
+# FALSE → outputs stay local only (laptop / smoke test).
+save_to_s3 <- FALSE
+
+s3_output_dir <- sprintf(
+  "s3://sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/%s/outputs",
+  scenario
+)
 ```
 
 ---
@@ -309,18 +321,23 @@ fit_cr_pixel <- function(pix_y, age_v, max_pot) {
 #' @param log_file  Path to log file for progress messages.
 #' @param app_cores   Integer number of cores to pass to terra::app().
 #'                    Use n_cores in "pixel" strategy; 1L in "tile" strategy.
-#' @param test_crop_n Integer. If > 0, crop the stacked raster to a
-#'                    test_crop_n × test_crop_n pixel window from the top-left
-#'                    corner before fitting. Use for smoke tests only.
+#' @param test_crop_n  Integer. If > 0, crop the stacked raster to a
+#'                     test_crop_n x test_crop_n pixel window before fitting.
+#'                     Use for smoke tests only.
+#' @param s3_output_dir Character S3 prefix (e.g.
+#'                     "s3://bucket/prefix/future/outputs") to upload each
+#'                     output GeoTIFF immediately after writing locally.
+#'                     NULL (default) skips the upload.
 #' @return Invisibly returns the tile_id on success.
 calc_cr_tile <- function(tile_id,
                          input_dir,
                          output_dir,
-                         ages        = seq(5, 100, by = 5),
-                         n_bands     = 20,
-                         log_file    = NULL,
-                         app_cores   = 1L,
-                         test_crop_n = 0L) {
+                         ages          = seq(5, 100, by = 5),
+                         n_bands       = 20,
+                         log_file      = NULL,
+                         app_cores     = 1L,
+                         test_crop_n   = 0L,
+                         s3_output_dir = NULL) {
 
   age_v <- rep(ages, each = n_bands)  # predictor vector, length 400
 
@@ -409,10 +426,20 @@ calc_cr_tile <- function(tile_id,
   invisible(lapply(param_dirs, dir.create, recursive = TRUE, showWarnings = FALSE))
 
   for (param in names(result)) {
-    out_path <- file.path(output_dir, param,
-                          sprintf("%s_%s.tif", param, tile_id))
-    writeRaster(result[[param]], out_path,
+    local_path <- file.path(output_dir, param,
+                            sprintf("%s_%s.tif", param, tile_id))
+    writeRaster(result[[param]], local_path,
                 gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+
+    # ── Optional: upload to S3 immediately after writing ──────────────────────
+    if (!is.null(s3_output_dir)) {
+      s3_path <- sprintf("%s/%s/%s_%s.tif", s3_output_dir, param, param, tile_id)
+      ret <- system2("aws", c("s3", "cp", local_path, s3_path, "--no-progress"),
+                     stdout = FALSE, stderr = FALSE)
+      if (ret != 0) {
+        warning(sprintf("[%s] S3 upload failed for %s", tile_id, param))
+      }
+    }
   }
 
   msg_done <- sprintf("[%s] Complete — %s\n",
@@ -519,14 +546,15 @@ if (parallel_strategy == "pixel") {
   # to be self-contained; the closures defined above satisfy this.
   for (tile_id in g_ids) {
     calc_cr_tile(
-      tile_id     = tile_id,
-      input_dir   = input_dir,
-      output_dir  = output_dir,
-      ages        = ages,
-      n_bands     = n_bands,
-      log_file    = log_file,
-      app_cores   = n_cores,
-      test_crop_n = if (test_mode) test_crop_n else 0L
+      tile_id       = tile_id,
+      input_dir     = input_dir,
+      output_dir    = output_dir,
+      ages          = ages,
+      n_bands       = n_bands,
+      log_file      = log_file,
+      app_cores     = n_cores,
+      test_crop_n   = if (test_mode) test_crop_n else 0L,
+      s3_output_dir = if (save_to_s3) s3_output_dir else NULL
     )
   }
 
@@ -543,7 +571,8 @@ if (parallel_strategy == "pixel") {
     cl,
     varlist = c(
       "calc_cr_tile", "attempt_nls", "fit_cr_pixel", "chapman_richards",
-      "input_dir", "output_dir", "ages", "n_bands", "log_file", "terra_mem_gb"
+      "input_dir", "output_dir", "ages", "n_bands", "log_file",
+      "terra_mem_gb", "save_to_s3", "s3_output_dir"
     )
   )
   clusterEvalQ(cl, {
@@ -553,14 +582,15 @@ if (parallel_strategy == "pixel") {
 
   foreach(tile_id = g_ids, .packages = "terra") %dopar% {
     calc_cr_tile(
-      tile_id     = tile_id,
-      input_dir   = input_dir,
-      output_dir  = output_dir,
-      ages        = ages,
-      n_bands     = n_bands,
-      log_file    = log_file,
-      app_cores   = 1L,
-      test_crop_n = if (test_mode) test_crop_n else 0L
+      tile_id       = tile_id,
+      input_dir     = input_dir,
+      output_dir    = output_dir,
+      ages          = ages,
+      n_bands       = n_bands,
+      log_file      = log_file,
+      app_cores     = 1L,
+      test_crop_n   = if (test_mode) test_crop_n else 0L,
+      s3_output_dir = if (save_to_s3) s3_output_dir else NULL
     )
   }
 
