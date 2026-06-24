@@ -1,0 +1,206 @@
+---
+title: "Input Data Acquisition"
+subtitle: "GCS to S3 (one-time) and S3 to SageMaker (each instance)"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+---
+
+## Overview
+
+Two-step data pipeline:
+
+1. **GCS to S3** - run **once** from a local machine (or any environment with
+   `rclone` and credentials for both GCS and S3). Pays GCS egress once; data
+   then lives durably in S3.
+2. **S3 to SageMaker** - run at the **start of each SageMaker session** to sync
+   data from S3 to the instance's local storage for fast parallel I/O during
+   the CR fitting run.
+
+---
+
+## 1. Configuration
+
+Set these variables once - they are referenced throughout the notebook.
+
+```{r config}
+# GCS source -----------------------------------------------------------------
+# Verify the exact folder structure in the bucket before running Section 2.
+gcs_bucket <- "carbon-accumulation-modeling-bucket"
+gcs_prefix <- "rf_outputs"           # path inside bucket to the scenario dirs
+
+# S3 destination -------------------------------------------------------------
+s3_bucket  <- "your-s3-bucket-name"  # replace with your bucket
+s3_prefix  <- "nat_for_regen/data/inputs"
+
+# Scenarios ------------------------------------------------------------------
+scenarios  <- c("future", "hist")
+
+# Local path (SageMaker) -----------------------------------------------------
+# Absolute path to the cloned repo on the SageMaker instance.
+local_repo   <- "/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw"
+local_inputs <- file.path(local_repo, "data", "inputs")
+```
+
+---
+
+## 2. GCS to S3 (one-time transfer)
+
+> **Run this section locally** (or on any machine with `rclone` installed and
+> credentials for both GCS and S3). Do **not** run on SageMaker - GCS egress
+> fees are incurred regardless of origin, and running it here saves nothing.
+
+### 2.1 Install rclone
+
+```{bash install-rclone}
+# macOS
+brew install rclone
+
+# Linux
+curl https://rclone.org/install.sh | sudo bash
+```
+
+### 2.2 Configure remotes
+
+Run `rclone config` interactively to create two named remotes.
+
+```{bash rclone-config}
+rclone config
+```
+
+**GCS remote** (name it `gcs`):
+
+- Type: `Google Cloud Storage`
+- Auth: `false` - uses application default credentials
+- Run `gcloud auth application-default login` beforehand, or supply a service
+  account JSON key path when prompted.
+
+**S3 remote** (name it `s3aws`):
+
+- Type: `Amazon S3`
+- Provider: `AWS`
+- Auth: enter your AWS access key and secret, **or** leave blank if your
+  environment inherits credentials from `~/.aws/credentials`.
+- Region: match your S3 bucket region (e.g. `us-east-1`)
+
+Verify both remotes before transferring:
+
+```{bash verify-remotes}
+rclone lsd gcs:carbon-accumulation-modeling-bucket/rf_outputs/
+rclone lsd s3aws:your-s3-bucket-name/nat_for_regen/data/inputs/
+```
+
+### 2.3 Transfer
+
+`--transfers 20` parallelises file-level transfers. Lower this if you see
+connection errors on a slower link.
+
+```{bash gcs-to-s3}
+GCS_BUCKET="carbon-accumulation-modeling-bucket"
+GCS_PREFIX="rf_outputs"
+S3_BUCKET="your-s3-bucket-name"
+S3_PREFIX="nat_for_regen/data/inputs"
+
+for SCENARIO in future hist; do
+  echo "=== Transferring ${SCENARIO} ==="
+  rclone copy \
+    "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/" \
+    "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/" \
+    --transfers 20 \
+    --progress \
+    --stats-one-line
+done
+```
+
+Verify file counts match the source:
+
+```{bash verify-s3}
+GCS_BUCKET="carbon-accumulation-modeling-bucket"
+GCS_PREFIX="rf_outputs"
+S3_BUCKET="your-s3-bucket-name"
+S3_PREFIX="nat_for_regen/data/inputs"
+
+for SCENARIO in future hist; do
+  N_GCS=$(rclone ls "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/" | wc -l)
+  N_S3=$(rclone  ls "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/" | wc -l)
+  echo "${SCENARIO} -- GCS: ${N_GCS} files | S3: ${N_S3} files"
+done
+```
+
+---
+
+## 3. S3 to SageMaker (run at instance start)
+
+> **Run this section on SageMaker.** The instance IAM role must have
+> `s3:GetObject` and `s3:ListBucket` on your bucket - no explicit credentials
+> are needed if the role is configured correctly.
+
+### 3.1 Clone the repo (first time only)
+
+```{bash clone-repo}
+cd /home/ec2-user/SageMaker
+git clone git@github.com:swiltshire/nat_for_regen_c_accumulation_sw.git
+```
+
+### 3.2 Sync inputs from S3
+
+`aws s3 sync` skips files that already exist and match, so re-running at the
+start of each session is safe and fast when nothing has changed.
+
+```{bash s3-to-sagemaker}
+S3_BUCKET="your-s3-bucket-name"
+S3_PREFIX="nat_for_regen/data/inputs"
+LOCAL_INPUTS="/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw/data/inputs"
+
+mkdir -p "${LOCAL_INPUTS}"
+
+for SCENARIO in future hist; do
+  echo "=== Syncing ${SCENARIO} from S3 ==="
+  aws s3 sync \
+    "s3://${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/" \
+    "${LOCAL_INPUTS}/${SCENARIO}/" \
+    --no-progress
+  echo "Done: ${SCENARIO}"
+done
+```
+
+### 3.3 Verify
+
+```{r verify-local}
+# Expected: 360 files per scenario (20 ages x 18 tiles)
+for (scenario in scenarios) {
+  d <- file.path(local_inputs, scenario)
+  n <- length(list.files(d, pattern = "\\.tif$"))
+  status <- if (n == 360) "OK" else sprintf("WARNING: expected 360, got %d", n)
+  cat(sprintf("%-8s  %d files  [%s]\n", scenario, n, status))
+}
+```
+
+---
+
+## 4. Sync outputs back to S3
+
+Run this after the CR fitting job completes, before terminating the instance.
+SageMaker instance storage is ephemeral - outputs not synced to S3 will be lost.
+
+```{bash upload-outputs}
+S3_BUCKET="your-s3-bucket-name"
+LOCAL_OUTPUTS="/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw/data/outputs"
+
+aws s3 sync \
+  "${LOCAL_OUTPUTS}/" \
+  "s3://${S3_BUCKET}/nat_for_regen/data/outputs/" \
+  --no-progress
+
+echo "Outputs synced to S3."
+```

@@ -16,11 +16,13 @@ per pixel via nonlinear least squares. Inputs are GEE-exported regional tiles at
 ## Repository structure
 
 ```
+setup/
+  fetch_input_data.Rmd      # Data pipeline: GCS -> S3 (once) and S3 -> SageMaker
 cr_calc/
-  cr_chapman_richards.Rmd   # Main notebook — run this
+  cr_chapman_richards.Rmd   # Main notebook -- run this
 data/
   inputs/
-    future/                 # 360 tiles: age_005_*.tif … age_100_*.tif (20 bands each)
+    future/                 # 360 tiles: age_005_*.tif ... age_100_*.tif (20 bands each)
     hist/                   # Same structure, historical climate scenario
   outputs/                  # Written by the notebook (gitignored)
 ```
