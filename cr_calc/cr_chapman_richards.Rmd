@@ -752,9 +752,10 @@ if (!save_to_s3) {
   cat(sprintf("  From: %s\n", output_dir))
   cat(sprintf("  To:   %s\n", s3_output_dir))
 
+  # rclone is used instead of aws CLI (not available in SageMaker Posit shell)
   ret <- system2(
-    "aws",
-    c("s3", "sync", output_dir, s3_output_dir, "--no-progress"),
+    "rclone",
+    c("copy", output_dir, s3_output_dir, "--transfers", "20", "--progress"),
     stdout = TRUE, stderr = TRUE
   )
 

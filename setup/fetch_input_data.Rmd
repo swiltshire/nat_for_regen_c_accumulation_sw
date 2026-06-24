@@ -20,36 +20,34 @@ knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
 
 Two-step data pipeline:
 
-1. **GCS to S3** - run **once** from a local machine (or any environment with
-   `rclone` and credentials for both GCS and S3). Pays GCS egress once; data
-   then lives durably in S3.
-2. **S3 to SageMaker** - run at the **start of each SageMaker session** to sync
-   data from S3 to the instance's local storage for fast parallel I/O during
+1. **GCS to S3** — run **once** to pay GCS egress once and land data durably
+   in S3.
+2. **S3 to SageMaker local** — run at the **start of each SageMaker session**
+   to pull data from S3 to local instance storage for fast parallel I/O during
    the CR fitting run.
+
+All shell commands run in the RStudio **Terminal tab** (not the Console).
+`rclone` is used throughout — the AWS CLI is not available in the SageMaker
+Posit shell.
 
 ---
 
 ## 1. Configuration
 
-Set these variables once - they are referenced throughout the notebook.
-
 ```{r config}
-# GCS source -----------------------------------------------------------------
-# Verify the exact folder structure in the bucket before running Section 2.
+# GCS source ------------------------------------------------------------------
 gcs_bucket <- "carbon-accumulation-modeling-bucket"
-gcs_prefix <- "rf_outputs"           # path inside bucket to the scenario dirs
+gcs_prefix <- "rf_outputs"
 
-# S3 destination -------------------------------------------------------------
-# Inputs are stored under the scenario subdirectory alongside outputs.
+# S3 --------------------------------------------------------------------------
 s3_bucket  <- "sagemaker-gst-stage.sharing"
 s3_prefix  <- "serge-wiltshire/nat_for_regen_c_accumulation_data"
 
-# Scenarios ------------------------------------------------------------------
+# Scenarios -------------------------------------------------------------------
 scenarios  <- c("future", "hist")
 
-# Local path (SageMaker) -----------------------------------------------------
-# Absolute path to the cloned repo on the SageMaker instance.
-local_repo   <- "/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw"
+# Local paths (SageMaker) -----------------------------------------------------
+local_repo   <- "/home/sagemaker-user/nat_for_regen_c_accumulation_sw"
 local_inputs <- file.path(local_repo, "data", "inputs")
 ```
 
@@ -57,122 +55,175 @@ local_inputs <- file.path(local_repo, "data", "inputs")
 
 ## 2. GCS to S3 (one-time transfer)
 
-> **Run this section locally** (or on any machine with `rclone` installed and
-> credentials for both GCS and S3). Do **not** run on SageMaker - GCS egress
-> fees are incurred regardless of origin, and running it here saves nothing.
+> Run this section **once** from the SageMaker Terminal. Data stays in S3
+> permanently — re-running is safe (`rclone copy` skips existing files).
 
 ### 2.1 Install rclone
 
 ```{bash install-rclone}
-# macOS
-brew install rclone
-
-# Linux
 curl https://rclone.org/install.sh | sudo bash
+rclone --version   # confirm install
 ```
 
-### 2.2 Configure remotes
+### 2.2 Create a GCP service account
 
-Run `rclone config` interactively to create two named remotes.
+rclone needs credentials to read from GCS. A service account JSON key is the
+right approach for a server environment without a browser.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Hamburger menu (≡) → **IAM & Admin** → **Service Accounts**
+3. **Create Service Account** → name it `rclone-gcs-reader` → **Create and Continue**
+4. Grant role: **Storage Object Viewer** → **Continue** → **Done**
+5. Click the new service account → **Keys** tab → **Add Key** → **Create new key** → **JSON** → **Create** (downloads automatically)
+6. Go to **Cloud Storage** → **Buckets** → click `carbon-accumulation-modeling-bucket` → **Permissions** → **Grant Access** → paste the service account email → role: **Storage Object Viewer** → **Save**
+7. Upload the JSON key to SageMaker via the RStudio **Files pane → Upload**
+
+### 2.3 Configure rclone remotes
+
+Run `rclone config` in the terminal and follow the prompts. Create two remotes
+using the settings below.
 
 ```{bash rclone-config}
 rclone config
 ```
 
-**GCS remote** (name it `gcs`):
+#### GCS remote
 
-- Type: `Google Cloud Storage`
-- Auth: `false` - uses application default credentials
-- Run `gcloud auth application-default login` beforehand, or supply a service
-  account JSON key path when prompted.
+| Prompt | Enter | Note |
+|--------|-------|------|
+| `n` for new remote | `n` | |
+| name | `gcs` | Used in all transfer commands |
+| Storage type | `Google Cloud Storage` | Search or select number |
+| client_id | Enter | Skip |
+| client_secret | Enter | Skip |
+| project_number | Enter | Skip — only needed for creating buckets |
+| user_project | Enter | Skip |
+| service_account_file | `/home/sagemaker-user/<key-filename>.json` | Full path to uploaded JSON key |
+| anonymous | Enter | Skip (default: false) |
+| object_acl | Enter | Skip — read-only use |
+| bucket_acl | Enter | Skip — read-only use |
+| bucket_policy_only | Enter | Skip |
+| location | Enter | Skip |
+| storage_class | Enter | Skip |
+| env_auth | Enter | Skip (default: false — using service account file) |
+| Edit advanced config | Enter | Skip (default: no) |
 
-**S3 remote** (name it `s3aws`):
+#### S3 remote
 
-- Type: `Amazon S3`
-- Provider: `AWS`
-- Auth: enter your AWS access key and secret, **or** leave blank if your
-  environment inherits credentials from `~/.aws/credentials`.
-- Region: match your S3 bucket region (e.g. `us-east-1`)
+The SageMaker instance has an IAM role attached — `env_auth = true` picks up
+credentials automatically; no access key or secret needed.
 
-Verify both remotes before transferring:
+Find your region first:
+
+```{bash find-region}
+echo $AWS_DEFAULT_REGION   # returns e.g. us-west-2
+```
+
+| Prompt | Enter | Note |
+|--------|-------|------|
+| `n` for new remote | `n` | |
+| name | `s3aws` | Used in all transfer commands |
+| Storage type | `Amazon S3` | Search or select number |
+| Provider | `AWS` | |
+| env_auth | `true` | Uses SageMaker IAM role automatically |
+| access_key_id | Enter | Skip — env_auth handles credentials |
+| secret_access_key | Enter | Skip — env_auth handles credentials |
+| region | `us-west-2` | Match your SageMaker instance region |
+| endpoint | Enter | Skip — standard AWS S3 |
+| location_constraint | Enter | Skip |
+| acl | Enter | Skip |
+| server_side_encryption | Enter | Skip |
+| sse_kms_key_id | Enter | Skip |
+| storage_class | Enter | Skip |
+| bucket_object_lock_enabled | Enter | Skip |
+| Edit advanced config | Enter | Skip (default: no) |
+
+### 2.4 Verify remotes
+
+Confirm both remotes can see what they need before starting the transfer.
 
 ```{bash verify-remotes}
+# Should show future/ and hist/ directories
 rclone lsd gcs:carbon-accumulation-modeling-bucket/rf_outputs/
-rclone lsd s3aws:your-s3-bucket-name/nat_for_regen/data/inputs/
+
+# Should show the serge-wiltshire/ prefix (may be empty before first transfer)
+rclone lsd s3aws:sagemaker-gst-stage.sharing/serge-wiltshire/
 ```
 
-### 2.3 Transfer
+### 2.5 Transfer data
 
-`--transfers 20` parallelises file-level transfers. Lower this if you see
-connection errors on a slower link.
+Run each scenario separately. Use `nohup` so the transfer survives a session
+disconnect, and `--log-file` to monitor progress.
 
-```{bash gcs-to-s3}
-GCS_BUCKET="carbon-accumulation-modeling-bucket"
-GCS_PREFIX="rf_outputs"
-S3_BUCKET="sagemaker-gst-stage.sharing"
-S3_PREFIX="serge-wiltshire/nat_for_regen_c_accumulation_data"
+```{bash transfer-future}
+nohup rclone copy \
+  "gcs:carbon-accumulation-modeling-bucket/rf_outputs/future/" \
+  "s3aws:sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/future/inputs/" \
+  --transfers 20 \
+  --stats 10s \
+  --log-file ~/rclone_future.log &
 
-for SCENARIO in future hist; do
-  echo "=== Transferring ${SCENARIO} ==="
-  rclone copy \
-    "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/" \
-    "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/inputs/" \
-    --transfers 20 \
-    --progress \
-    --stats-one-line
-done
+tail -f ~/rclone_future.log
 ```
 
-Verify file counts match the source:
+`Ctrl+C` stops the log tail — the transfer keeps running in the background.
 
-```{bash verify-s3}
-GCS_BUCKET="carbon-accumulation-modeling-bucket"
-GCS_PREFIX="rf_outputs"
-S3_BUCKET="sagemaker-gst-stage.sharing"
-S3_PREFIX="serge-wiltshire/nat_for_regen_c_accumulation_data"
+```{bash transfer-hist}
+nohup rclone copy \
+  "gcs:carbon-accumulation-modeling-bucket/rf_outputs/hist/" \
+  "s3aws:sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/hist/inputs/" \
+  --transfers 20 \
+  --stats 10s \
+  --log-file ~/rclone_hist.log &
 
+tail -f ~/rclone_hist.log
+```
+
+### 2.6 Verify transfer
+
+Confirm file counts match between GCS and S3.
+
+```{bash verify-transfer}
 for SCENARIO in future hist; do
-  N_GCS=$(rclone ls "gcs:${GCS_BUCKET}/${GCS_PREFIX}/${SCENARIO}/"         | wc -l)
-  N_S3=$(rclone  ls "s3aws:${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/inputs/"  | wc -l)
+  N_GCS=$(rclone ls "gcs:carbon-accumulation-modeling-bucket/rf_outputs/${SCENARIO}/"                                                           | wc -l)
+  N_S3=$(rclone  ls "s3aws:sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/${SCENARIO}/inputs/" | wc -l)
   echo "${SCENARIO} -- GCS: ${N_GCS} files | S3: ${N_S3} files"
 done
 ```
 
 ---
 
-## 3. S3 to SageMaker (run at instance start)
+## 3. S3 to SageMaker local (run at instance start)
 
-> **Run this section on SageMaker.** The instance IAM role must have
-> `s3:GetObject` and `s3:ListBucket` on your bucket - no explicit credentials
-> are needed if the role is configured correctly.
+> Run this section each time you start a new SageMaker session.
+> `rclone copy` skips files that already exist, so re-running is fast.
 
 ### 3.1 Clone the repo (first time only)
 
 ```{bash clone-repo}
-cd /home/ec2-user/SageMaker
-git clone git@github.com:swiltshire/nat_for_regen_c_accumulation_sw.git
+cd /home/sagemaker-user
+git clone https://github.com/swiltshire/nat_for_regen_c_accumulation_sw.git
 ```
+
+If the repo is private, use your GitHub username and a Personal Access Token
+(not your password) when prompted. Generate one at:
+GitHub → Settings → Developer settings → Personal access tokens → Generate new
+token (scope: `repo`).
 
 ### 3.2 Sync inputs from S3
 
-`aws s3 sync` skips files that already exist and match, so re-running at the
-start of each session is safe and fast when nothing has changed.
+```{bash sync-future}
+rclone copy \
+  "s3aws:sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/future/inputs/" \
+  "/home/sagemaker-user/nat_for_regen_c_accumulation_sw/data/inputs/future/" \
+  --transfers 20 --progress
+```
 
-```{bash s3-to-sagemaker}
-S3_BUCKET="sagemaker-gst-stage.sharing"
-S3_PREFIX="serge-wiltshire/nat_for_regen_c_accumulation_data"
-LOCAL_INPUTS="/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw/data/inputs"
-
-mkdir -p "${LOCAL_INPUTS}"
-
-for SCENARIO in future hist; do
-  echo "=== Syncing ${SCENARIO} from S3 ==="
-  aws s3 sync \
-    "s3://${S3_BUCKET}/${S3_PREFIX}/${SCENARIO}/inputs/" \
-    "${LOCAL_INPUTS}/${SCENARIO}/" \
-    --no-progress
-  echo "Done: ${SCENARIO}"
-done
+```{bash sync-hist}
+rclone copy \
+  "s3aws:sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/hist/inputs/" \
+  "/home/sagemaker-user/nat_for_regen_c_accumulation_sw/data/inputs/hist/" \
+  --transfers 20 --progress
 ```
 
 ### 3.3 Verify
@@ -186,5 +237,3 @@ for (scenario in scenarios) {
   cat(sprintf("%-8s  %d files  [%s]\n", scenario, n, status))
 }
 ```
-
-
