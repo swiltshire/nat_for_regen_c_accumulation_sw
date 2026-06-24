@@ -1,136 +1,91 @@
-# Carbon Accumulation Curves from Natural Forest Regneration 
-[![DOI](https://zenodo.org/badge/748392120.svg)](https://doi.org/10.5281/zenodo.15078012)
-- [Carbon Accumulation Curves from Natural Forest Regneration](#carbon-accumulation-curves-from-natural-forest-regneration)
-  - [Overview](#overview)
-  - [System Requirements](#system-requirements)
-    - [Hardware](#hardware)
-    - [Operating System](#operating-system)
-    - [Google Earth Engine (GEE)](#google-earth-engine-gee)
-    - [R](#r)
-  - [Installation](#installation)
-  - [Usage](#usage)
-    - [CR Calculation and Demo](#cr-calculation-and-demo)
-      - [Google Earth Engine](#google-earth-engine)
-      - [R Scripts](#r-scripts)
-        - [Overview](#overview-1)
-        - [Required Inputs](#required-inputs)
-        - [Required Packages](#required-packages)
-        - [Running the Script](#running-the-script)
-    - [Figures](#figures)
-      - [R](#r-1)
-      - [Data](#data)
-      - [GEE](#gee)
-  - [License](#license)
+# Chapman-Richards Carbon Accumulation Curve Fitting
 
----
+Fits pixel-level Chapman-Richards (CR) growth curves to above-ground carbon (AGC)
+estimates from random forest outputs, for natural forest regeneration carbon modeling.
 
 ## Overview
-This repository contains code used to derive Chapman-Richards (CR) growth curve parameters for the manuscript *Protect young secondary forests for optimum carbon removal* (in review at *Nature Climate Change*). A link and DOI will be provided upon publication.
 
-**Key Highlights:**
-- Derivation of global CR growth parameters from large-scale forest inventory data.
-- Multi-core parallelized processing of 5°x5° tiles, requiring significant computational resources.
-- Demonstration code and partial data for reproducible workflows.
+For each pixel the model is:
 
----
+$$\text{AGC}(t) = A \cdot (1 - B \cdot e^{-Kt})^3$$
 
-## System Requirements
+where *A* (asymptote), *K* (growth rate), and *B* (shape) are estimated independently
+per pixel via nonlinear least squares. Inputs are GEE-exported regional tiles at
+~1 km resolution for two climate scenarios (**hist**, **future**).
 
-### Hardware
-- A standard computer or server with sufficient RAM for in-memory processing (at least 16 GB recommended).  
-- Parallel processing (e.g., multiple cores) is beneficial for the full version.
+## Repository structure
 
-### Operating System
-- Tested on macOS (Intel and ARM) >= 10.14, but should work on any system capable of running R.
+```
+cr_calc/
+  cr_chapman_richards.Rmd   # Main notebook — run this
+data/
+  inputs/
+    future/                 # 360 tiles: age_005_*.tif … age_100_*.tif (20 bands each)
+    hist/                   # Same structure, historical climate scenario
+  outputs/                  # Written by the notebook (gitignored)
+```
 
-### Google Earth Engine (GEE)
-- Access to the GEE JavaScript Code Editor.
-- Proper authentication via a Google Cloud Project.
-  
-> **Note**: Much of the forest plot data used in this project is restricted. Without access to these data, you cannot fully reproduce the GEE workflow.
+## Inputs
 
-### R
-- Tested on R >= 4.4.
-- Required packages for the demo include: `terra`, `tidyverse`, `parallel`, `doParallel`, `foreach`, `tictoc`.
-- Additional packages may be listed at the top of each script.
+Each input file covers a ~62°×62° regional tile at 0.00833° (~1 km) resolution:
 
----
+| Property | Value |
+|---|---|
+| Naming | `age_{AGE}_{TILE_ID}.tif` |
+| Age steps | 5, 10, …, 100 years (20 files per tile) |
+| Bands per file | 20 (random forest replicates `sd_001`–`sd_020`) |
+| Tiles per scenario | 18 |
+| Data points per pixel | 400 (20 ages × 20 replicates) |
 
-## Installation
+## Outputs
 
-1. **Clone this repository:**
-   ```bash
-   git clone https://github.com/naturalclimatesolutions/nat_for_regen_c_accumulation.git
+Seven single-band GeoTIFFs per tile, written to `data/outputs/{scenario}/{param}/`:
 
-2. **Google Earth Engine Code:** Copy the relevant scripts from the GEE/ directory into your GEE JavaScript workspace, if needed.
+| File | Contents |
+|---|---|
+| `A_{tile_id}.tif` | CR asymptote (max potential AGC) |
+| `K_{tile_id}.tif` | Growth rate |
+| `B_{tile_id}.tif` | Shape parameter |
+| `A_error_{tile_id}.tif` | Std. error of A |
+| `K_error_{tile_id}.tif` | Std. error of K |
+| `B_error_{tile_id}.tif` | Std. error of B |
+| `convergence_{tile_id}.tif` | NLS iteration count (1–3) or 4 = failed |
 
 ## Usage
 
-### CR Calculation and Demo
+Open `cr_calc/cr_chapman_richards.Rmd` and set the options in **Section 2**:
 
-#### Google Earth Engine
-+ Code is available under cr_calc/GEE/
-+ **Important:** The GEE code is not fully functional due to restricted data-sharing permissions for forest plot data and covariate input stacks. The code is provided for review purposes only. For questions or concerns, please contact [Nathaniel Robinson](n.robinson@cifor-icraf.org)
+```r
+test_mode   <- TRUE    # FALSE for full production run
+scenario    <- "future"  # or "hist"
+n_cores     <- ...     # auto-detected; override if needed
+terra_mem_gb <- 8      # increase for large instances
+```
 
-#### R Scripts
+Run all chunks, or knit the document. For the second scenario, change `scenario`
+and re-run.
 
-##### Overview
-+ ```cr_calc/R/calc_chapman_richards.R``` – Main script for generating global CR parameters.
-+ ```demo/calc_chapman_richards_demo.R``` – Demonstration script using a single 5°x5° tile to illustrate the workflow.
-  
-**Performance Note:** The full version leverages multi-core machines for parallel processing. The outputs from Google Earth Engine are exported as 5°x5° tiles and processed in parallel. The full script requires substantial computational resources. On a 128 GB RAM, 24-core machine, processing all tiles took over two weeks.
+### Smoke test
 
-The demo version uses one 5°x5° tile (from the Pacific Northwest region of the United States). If you would like to test other tiles, please contact[Nathaniel Robinson](n.robinson@cifor-icraf.org).
+With `test_mode <- TRUE` the notebook crops one tile to a 150×150 pixel window
+centred on the densest valid data, runs the full fitting pipeline (~35 s on a
+laptop), and produces diagnostic plots of fitted curves vs observed scatter.
 
-##### Required Inputs
+### SageMaker
 
-> (Available in the `Inputs` directory)
+On a large Linux instance (e.g. `ml.r5.24xlarge`) the notebook auto-selects the
+`"pixel"` parallel strategy, which passes all available cores to `terra::app()`
+for within-tile pixel parallelism. Set `terra_mem_gb` to ~75% of available RAM.
 
-1. **Above Ground Carbon (AGC) Estimates** 
-+ TIF files uner `inputs/agc_5_deg/agc/*.tif`
-+  20 images, each containing 100 bands of AGC estimates.
+```r
+project_root <- "/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw"
+terra_mem_gb <- 500   # example for 768 GB instance
+```
 
-2. **Valid Pixels:**
-   + Binary raster in `agc_5_deg/agc_valid/` (e.g. `valid_agc_grd_79.tif`).
+## Dependencies
 
-3. **Maximu Potential**
-+ Raster of maximum potential AGC in `agc_5_deg/max_pot/` (e.g. `agc_pot_grd_79.tif`).
+```r
+install.packages(c("terra", "tidyverse", "parallel", "doParallel", "foreach", "tictoc"))
+```
 
-##### Required Packages
-The full script requires packages for parallelization. The exact setup may vary depending on your processor and operating system.
-
-The demo version does not require parallelization. For specific package requirements by script, see the [R](#r) section above.
-
-When running the script, any missing packages should be detected and installed automatically. If automatic installation fails, you may need to install them manually.
-
-*Note: The `terra` package has system dependencies (e.g., GDAL). Please ensure these are installed.*
-
-##### Running the Script
-If the repository’s directory structure is preserved, the script will set the working directory automatically, as well as the input and output directories.
-
-- **Run time (Demo):** Approximately 1–2 hours (depending on system specs)
-- **Outputs:**  
-  1. `A_grd_79.tif`: Chapman-Richards A parameter  
-  2. `B_grd_79.tif`: Chapman-Richards B parameter  
-  3. `K_grd_79.tif`: Chapman-Richards K parameter  
-  4. `A_error_grd_79.tif`: Standard error of A  
-  5. `B_error_grd_79.tif`: Standard error of B  
-  6. `K_error_grd_79.tif`: Standard error of K  
-  7. `convergence_grd_79.tif`: Number of iterations used to reach convergence for each pixel
-
-
-### Figures
-#### R
-This folder contains R code to create the figures in the manuscript. The code is located in the `R/figures` directory. Each R script, contains code to autmatically detect, install, and load required packages. The figures produced in these scripts are 'base figures' which were exported as SVG graphic files and styled in Adobe Illustrator. The final figures in the manuscript were created in Adobe Illustrator using these base figures.
-
-#### Data
-The data used to create the figures in the manuscript are located in the `Data` directory. The data are organized by figure number, and the required data is autmotacially loaded in the R scripts, using relative path directories.
-
-#### GEE
-Figure 2, and Extended Data Figure 2, are maps, created with geoTiffs exported from Google Earth Engine. There were styled in QGIS, and thus no code for these figures is availble in this repository. The GEE code used to create and export the geoTiffs is in figures/GEE.
-
----
-
-## License
-This project is licensed under the **Apache License 2.0**. Please see the [LICENSE](LICENSE) file for details.
-
+Tested on R ≥ 4.3. `terra` requires GDAL — ensure system dependencies are present.

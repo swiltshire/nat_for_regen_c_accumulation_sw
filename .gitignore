@@ -37,8 +37,8 @@ vignettes/*.pdf
 
 .DS_Store
 
-cr_calc/data/
+# Data — too large for GitHub; manage via S3/GCS or similar
+data/inputs/
+data/outputs/
 
-cr_calc/R/.RDataTmp
-
-cr_calc/R/progress_log.txt
+.positai
