@@ -149,9 +149,8 @@ terra_mem_gb <- 8
 terraOptions(memmax = terra_mem_gb)
 
 # ── S3 output ─────────────────────────────────────────────────────────────────
-# TRUE  → each tile's output GeoTIFFs are uploaded to S3 immediately after
-#          being written locally. Requires the AWS CLI and appropriate IAM
-#          permissions (automatic on SageMaker with a configured role).
+# TRUE  → after all tiles complete, sync local outputs to S3 (Section 9).
+#          Requires the AWS CLI and IAM permissions (automatic on SageMaker).
 # FALSE → outputs stay local only (laptop / smoke test).
 save_to_s3 <- FALSE
 
@@ -321,23 +320,18 @@ fit_cr_pixel <- function(pix_y, age_v, max_pot) {
 #' @param log_file  Path to log file for progress messages.
 #' @param app_cores   Integer number of cores to pass to terra::app().
 #'                    Use n_cores in "pixel" strategy; 1L in "tile" strategy.
-#' @param test_crop_n  Integer. If > 0, crop the stacked raster to a
-#'                     test_crop_n x test_crop_n pixel window before fitting.
-#'                     Use for smoke tests only.
-#' @param s3_output_dir Character S3 prefix (e.g.
-#'                     "s3://bucket/prefix/future/outputs") to upload each
-#'                     output GeoTIFF immediately after writing locally.
-#'                     NULL (default) skips the upload.
+#' @param test_crop_n Integer. If > 0, crop the stacked raster to a
+#'                    test_crop_n x test_crop_n pixel window before fitting.
+#'                    Use for smoke tests only.
 #' @return Invisibly returns the tile_id on success.
 calc_cr_tile <- function(tile_id,
                          input_dir,
                          output_dir,
-                         ages          = seq(5, 100, by = 5),
-                         n_bands       = 20,
-                         log_file      = NULL,
-                         app_cores     = 1L,
-                         test_crop_n   = 0L,
-                         s3_output_dir = NULL) {
+                         ages        = seq(5, 100, by = 5),
+                         n_bands     = 20,
+                         log_file    = NULL,
+                         app_cores   = 1L,
+                         test_crop_n = 0L) {
 
   age_v <- rep(ages, each = n_bands)  # predictor vector, length 400
 
@@ -426,20 +420,10 @@ calc_cr_tile <- function(tile_id,
   invisible(lapply(param_dirs, dir.create, recursive = TRUE, showWarnings = FALSE))
 
   for (param in names(result)) {
-    local_path <- file.path(output_dir, param,
-                            sprintf("%s_%s.tif", param, tile_id))
-    writeRaster(result[[param]], local_path,
+    out_path <- file.path(output_dir, param,
+                          sprintf("%s_%s.tif", param, tile_id))
+    writeRaster(result[[param]], out_path,
                 gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
-
-    # ── Optional: upload to S3 immediately after writing ──────────────────────
-    if (!is.null(s3_output_dir)) {
-      s3_path <- sprintf("%s/%s/%s_%s.tif", s3_output_dir, param, param, tile_id)
-      ret <- system2("aws", c("s3", "cp", local_path, s3_path, "--no-progress"),
-                     stdout = FALSE, stderr = FALSE)
-      if (ret != 0) {
-        warning(sprintf("[%s] S3 upload failed for %s", tile_id, param))
-      }
-    }
   }
 
   msg_done <- sprintf("[%s] Complete — %s\n",
@@ -546,15 +530,14 @@ if (parallel_strategy == "pixel") {
   # to be self-contained; the closures defined above satisfy this.
   for (tile_id in g_ids) {
     calc_cr_tile(
-      tile_id       = tile_id,
-      input_dir     = input_dir,
-      output_dir    = output_dir,
-      ages          = ages,
-      n_bands       = n_bands,
-      log_file      = log_file,
-      app_cores     = n_cores,
-      test_crop_n   = if (test_mode) test_crop_n else 0L,
-      s3_output_dir = if (save_to_s3) s3_output_dir else NULL
+      tile_id     = tile_id,
+      input_dir   = input_dir,
+      output_dir  = output_dir,
+      ages        = ages,
+      n_bands     = n_bands,
+      log_file    = log_file,
+      app_cores   = n_cores,
+      test_crop_n = if (test_mode) test_crop_n else 0L
     )
   }
 
@@ -571,8 +554,7 @@ if (parallel_strategy == "pixel") {
     cl,
     varlist = c(
       "calc_cr_tile", "attempt_nls", "fit_cr_pixel", "chapman_richards",
-      "input_dir", "output_dir", "ages", "n_bands", "log_file",
-      "terra_mem_gb", "save_to_s3", "s3_output_dir"
+      "input_dir", "output_dir", "ages", "n_bands", "log_file", "terra_mem_gb"
     )
   )
   clusterEvalQ(cl, {
@@ -582,15 +564,14 @@ if (parallel_strategy == "pixel") {
 
   foreach(tile_id = g_ids, .packages = "terra") %dopar% {
     calc_cr_tile(
-      tile_id       = tile_id,
-      input_dir     = input_dir,
-      output_dir    = output_dir,
-      ages          = ages,
-      n_bands       = n_bands,
-      log_file      = log_file,
-      app_cores     = 1L,
-      test_crop_n   = if (test_mode) test_crop_n else 0L,
-      s3_output_dir = if (save_to_s3) s3_output_dir else NULL
+      tile_id     = tile_id,
+      input_dir   = input_dir,
+      output_dir  = output_dir,
+      ages        = ages,
+      n_bands     = n_bands,
+      log_file    = log_file,
+      app_cores   = 1L,
+      test_crop_n = if (test_mode) test_crop_n else 0L
     )
   }
 
@@ -751,6 +732,35 @@ knitr::kable(summary_tbl,
 log_lines <- readLines(log_file)
 tail_n <- min(30, length(log_lines))
 cat(tail(log_lines, tail_n), sep = "\n")
+```
+
+---
+
+---
+
+## 9. Sync Outputs to S3
+
+Only runs when `save_to_s3 <- TRUE` in Section 2. Run this after all tiles
+for the current scenario are complete. On SageMaker the instance IAM role
+provides credentials automatically.
+
+```{r sync-to-s3}
+if (!save_to_s3) {
+  message("save_to_s3 is FALSE — skipping S3 sync.")
+} else {
+  cat(sprintf("Syncing %s outputs to S3...\n", scenario))
+  cat(sprintf("  From: %s\n", output_dir))
+  cat(sprintf("  To:   %s\n", s3_output_dir))
+
+  ret <- system2(
+    "aws",
+    c("s3", "sync", output_dir, s3_output_dir, "--no-progress"),
+    stdout = TRUE, stderr = TRUE
+  )
+
+  if (length(ret) > 0) cat(ret, sep = "\n")
+  cat(sprintf("\nDone — %s outputs synced to S3.\n", scenario))
+}
 ```
 
 ---
