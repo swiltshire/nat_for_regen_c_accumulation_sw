@@ -575,20 +575,21 @@ results <- parallel::mclapply(work_units, function(wu) {
       msg <- sprintf("[%s/%s | pid=%d] FATAL: %s\n",
                      wu$scenario, wu$tile_id, Sys.getpid(), conditionMessage(e))
       cat(msg, file = wu$log_file, append = TRUE)
-      conditionMessage(e)
+      paste("ERROR:", conditionMessage(e))
     }
   )
 }, mc.cores = n_workers)
 
 # ── Report ────────────────────────────────────────────────────────────────
-n_err <- sum(vapply(results, function(x) is.character(x), logical(1)))
+is_err <- vapply(results, function(x) {
+  is.character(x) && startsWith(x, "ERROR:")
+}, logical(1))
 cat(sprintf("\n=== Done | %d work units | %d errors | %s ===\n",
-            length(results), n_err, format(Sys.time())))
+            length(results), sum(is_err), format(Sys.time())))
 
-if (n_err > 0) {
-  errs <- Filter(is.character, results)
+if (any(is_err)) {
   cat("\nErrors:\n")
-  invisible(lapply(errs, function(e) cat("  ", e, "\n")))
+  invisible(lapply(results[is_err], function(e) cat("  ", e, "\n")))
 }
 ```
 
