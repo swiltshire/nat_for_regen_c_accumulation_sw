@@ -590,53 +590,56 @@ cat("Output directories ready under:", output_dir, "\n")
 
 ## 6. CR Parameter Fitting
 
-Each work unit (tile × strip) is dispatched to a socket-cluster worker via
-`foreach %dopar%`. With 18 tiles × 5 strips/tile = 90 work units, this keeps
-~90 cores busy without relying on `terra::app()` internal parallelism.
+Each work unit runs as an **independent `Rscript` process** launched from bash.
+No R-level parallelism (no fork, no sockets, no serialization). Each process
+loads its own R, terra, and minpack.lm instance, processes one strip, and exits.
+This is the most robust approach for SageMaker Posit.
 
-To process both scenarios back-to-back, change `scenario` in Section 2 and
-re-run from Section 2 onward.
+### 6.1 Generate job commands
 
-```{r fit_parallel}
-tic(sprintf("CR fitting — %s (%d work units)", scenario, length(work_units)))
+```{r generate_jobs}
+jobs_file <- file.path(project_root, sprintf("jobs_%s.txt", scenario))
 
-n_workers <- min(n_cores, length(work_units))
-cat(sprintf("Running %d work units with %d forked workers\n",
-            length(work_units), n_workers))
-
-# mclapply uses fork on Linux — child processes inherit the parent's memory
-# directly (no serialization), which avoids the "external pointer is not valid"
-# error that occurs when foreach socket clusters try to serialize terra objects.
-# Per-worker memory: divide available RAM across workers, leave 20% for OS
-per_worker_mem <- max(1L, floor(terra_mem_gb * 0.8 / n_workers))
-cat(sprintf("Per-worker terra memmax: %d GB\n", per_worker_mem))
-
-results <- parallel::mclapply(work_units, function(wu) {
-  library(terra)
-  library(minpack.lm)
-  terraOptions(memmax = per_worker_mem)
-  calc_cr_tile(
-    tile_id      = wu$tile_id,
-    input_dir    = input_dir,
-    output_dir   = output_dir,
-    ages         = ages,
-    n_bands      = n_bands,
-    log_file     = log_file,
-    app_cores    = 1L,
-    test_crop_n  = if (is.null(wu$crop_ext)) test_crop_n else 0L,
-    crop_ext     = wu$crop_ext,
-    strip_suffix = wu$strip_suffix
+job_lines <- vapply(work_units, function(wu) {
+  sprintf(
+    'cd %s && Rscript cr_calc/run_strip.R "%s" %s "%s" "%s" "%s" "%s"',
+    project_root,
+    wu$tile_id,
+    paste(wu$crop_ext, collapse = " "),
+    wu$strip_suffix,
+    input_dir,
+    output_dir,
+    log_file
   )
-}, mc.cores = n_workers)
+}, character(1))
 
-# Check for errors
-errors <- sapply(results, inherits, "try-error")
-if (any(errors)) {
-  warning(sprintf("%d of %d work units failed", sum(errors), length(results)))
-}
+writeLines(job_lines, jobs_file)
+cat(sprintf("Wrote %d jobs to %s\n", length(job_lines), jobs_file))
+```
 
-toc()
-gc()
+### 6.2 Launch all strips
+
+Run this chunk, or copy the command into the **Terminal** tab. The R session
+stays responsive — all work happens in background Rscript processes.
+
+Each process uses ~200–500 MB of RAM. With 72 processes on a 192 GB instance,
+total memory demand is ~30–40 GB — well within budget.
+
+Monitor progress via the log file from the terminal:
+`tail -f data/outputs/{scenario}/progress_{scenario}.log`
+
+```{bash run_jobs, eval=FALSE}
+# Run all strips in parallel as independent Rscript processes.
+# Adjust -P to control how many run simultaneously (default: 72).
+cat jobs_hist.txt | xargs -P72 -I{} bash -c '{}' 2>&1 | tee run_hist.log
+```
+
+If the bash chunk doesn't work in RStudio, run directly in the **Terminal**:
+
+```
+cd /home/sagemaker-user/nat_for_regen_c_accumulation_sw
+nohup bash -c 'cat jobs_hist.txt | xargs -P72 -I{} bash -c "{}" 2>&1' > run_hist.log &
+tail -f data/outputs/hist/progress_hist.log
 ```
 
 ---
