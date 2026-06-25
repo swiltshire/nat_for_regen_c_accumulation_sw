@@ -65,6 +65,7 @@ $$
 required_packages <- c(
   "terra",
   "tidyverse",
+  "minpack.lm",
   "parallel",
   "doParallel",
   "foreach",
@@ -205,17 +206,16 @@ attempt_nls <- function(pix_y, age_v,
                         a_start,
                         k_start = 0.05,
                         b_start = 0.75) {
-  lower <- list(a = a_start * 0.9, k = 0.01, b = 0.2)
-  upper <- list(a = a_start * 1.1, k = 0.10, b = 1.0)
+  lower <- c(a = a_start * 0.9, k = 0.01, b = 0.2)
+  upper <- c(a = a_start * 1.1, k = 0.10, b = 1.0)
 
   fit <- try(
-    nls(
+    minpack.lm::nlsLM(
       pix_y ~ a * (1 - b * exp(-k * age_v))^3,
-      algorithm = "port",
-      start     = list(a = a_start, k = k_start, b = b_start),
-      lower     = lower,
-      upper     = upper,
-      control   = nls.control(warnOnly = TRUE, maxiter = 5000)
+      start   = list(a = a_start, k = k_start, b = b_start),
+      lower   = lower,
+      upper   = upper,
+      control = minpack.lm::nls.lm.control(maxiter = 500)
     ),
     silent = TRUE
   )
@@ -422,14 +422,15 @@ calc_cr_tile <- function(tile_id,
     av <- age_v   # capture predictor vector
 
     .attempt_nls <- function(pix_y, age_v, a_start, k_start = 0.05, b_start = 0.75) {
-      lower <- list(a = a_start * 0.9, k = 0.01, b = 0.2)
-      upper <- list(a = a_start * 1.1, k = 0.10, b = 1.0)
-      fit <- try(nls(pix_y ~ a * (1 - b * exp(-k * age_v))^3,
-                     algorithm = "port",
-                     start     = list(a = a_start, k = k_start, b = b_start),
-                     lower = lower, upper = upper,
-                     control = nls.control(warnOnly = TRUE, maxiter = 5000)),
-                 silent = TRUE)
+      lower <- c(a = a_start * 0.9, k = 0.01, b = 0.2)
+      upper <- c(a = a_start * 1.1, k = 0.10, b = 1.0)
+      fit <- try(minpack.lm::nlsLM(
+        pix_y ~ a * (1 - b * exp(-k * age_v))^3,
+        start   = list(a = a_start, k = k_start, b = b_start),
+        lower   = lower,
+        upper   = upper,
+        control = minpack.lm::nls.lm.control(maxiter = 500)
+      ), silent = TRUE)
       if (inherits(fit, "try-error")) return(NULL)
       cf <- coef(fit)
       se <- tryCatch(summary(fit)$coefficients[, "Std. Error"],
@@ -606,10 +607,11 @@ clusterExport(
 )
 clusterEvalQ(cl, {
   library(terra)
+  library(minpack.lm)
   terraOptions(memmax = terra_mem_gb)
 })
 
-foreach(wu = work_units, .packages = "terra") %dopar% {
+foreach(wu = work_units, .packages = c("terra", "minpack.lm")) %dopar% {
   calc_cr_tile(
     tile_id      = wu$tile_id,
     input_dir    = input_dir,
