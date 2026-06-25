@@ -6,7 +6,7 @@
 
 library(knitr)
 
-rmd_file <- file.path(dirname(sys.frame(1)$ofile), "cr_chapman_richards.Rmd")
+rmd_file <- "cr_calc/cr_chapman_richards.Rmd"
 
 cat("=== Wrapper started:", format(Sys.time()), "===\n")
 cat("Rmd file:", rmd_file, "\n")
