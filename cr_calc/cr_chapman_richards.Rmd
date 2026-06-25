@@ -102,11 +102,14 @@ scenario <- "hist"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Notebook-relative root of the project (two levels up from cr_calc/).
-# On SageMaker Posit, this resolves automatically via rstudioapi. If running
-# via the wrapper script, rstudioapi may not be available — set explicitly:
-#   project_root <- "/home/sagemaker-user/nat_for_regen_c_accumulation_sw"
-project_root <- normalizePath(file.path(dirname(rstudioapi::getActiveDocumentContext()$path),
-                                         ".."))
+# Detect project root: use rstudioapi if available (interactive RStudio),
+# otherwise fall back to the working directory (Rscript / command line).
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+  project_root <- normalizePath(file.path(
+    dirname(rstudioapi::getActiveDocumentContext()$path), ".."))
+} else {
+  project_root <- getwd()
+}
 
 input_dir  <- file.path(project_root, "data", "inputs",  scenario)
 output_dir <- file.path(project_root, "data", "outputs", scenario)
@@ -131,11 +134,11 @@ n_cores  <- max(1L, detectCores() - 1L)
 # Strips per tile: total work units = n_tiles × n_strips_per_tile.
 n_strips_per_tile <- max(1L, floor(n_cores / n_tiles))
 
-# Max simultaneous workers. mclapply processes work units in batches of this
-# size. Start conservative — each forked worker uses 3-5 GB of actual RAM
-# (beyond terra's memmax budget), so 72 workers can exhaust even 384 GB.
-# Increase gradually once runs are stable.
-max_workers <- 20L
+# Max simultaneous mclapply workers. When run via Rscript (outside RStudio
+# Server), forking is safe and memory is the only constraint. Each worker
+# uses ~3-5 GB actual RAM. On ml.m5.24xlarge (384 GB): 40 workers ≈ 160 GB.
+# Increase once confirmed stable.
+max_workers <- 40L
 
 cat(sprintf("Cores: %d | Strips/tile: %d | Work units: %d | Max workers: %d\n",
             n_cores, n_strips_per_tile, n_tiles * n_strips_per_tile, max_workers))
