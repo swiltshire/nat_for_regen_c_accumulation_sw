@@ -632,11 +632,13 @@ if (!test_mode) {
   library(ggplot2)
 
   # ── Reload the fitted parameter rasters ──────────────────────────────────────
-  tile_id  <- g_ids[1]
-  a_path   <- file.path(output_dir, "A",           sprintf("A_%s.tif",           tile_id))
-  k_path   <- file.path(output_dir, "K",           sprintf("K_%s.tif",           tile_id))
-  b_path   <- file.path(output_dir, "B",           sprintf("B_%s.tif",           tile_id))
-  cnv_path <- file.path(output_dir, "convergence", sprintf("convergence_%s.tif", tile_id))
+  wu       <- work_units[[1]]
+  tile_id  <- wu$tile_id
+  suffix   <- wu$strip_suffix
+  a_path   <- file.path(output_dir, "A",           sprintf("A_%s%s.tif",           tile_id, suffix))
+  k_path   <- file.path(output_dir, "K",           sprintf("K_%s%s.tif",           tile_id, suffix))
+  b_path   <- file.path(output_dir, "B",           sprintf("B_%s%s.tif",           tile_id, suffix))
+  cnv_path <- file.path(output_dir, "convergence", sprintf("convergence_%s%s.tif", tile_id, suffix))
 
   A_rast   <- rast(a_path)
   K_rast   <- rast(k_path)
