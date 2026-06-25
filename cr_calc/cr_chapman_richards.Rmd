@@ -599,7 +599,10 @@ re-run from Section 2 onward.
 ```{r fit_parallel}
 tic(sprintf("CR fitting — %s (%d work units)", scenario, length(work_units)))
 
-n_workers <- min(n_cores, length(work_units))
+# R has a hard limit of 128 simultaneous connections. Cap workers to leave
+# headroom for R internals, RStudio Server, and terra file handles.
+n_workers <- min(n_cores, length(work_units), 80L)
+cat(sprintf("Launching %d workers for %d work units\n", n_workers, length(work_units)))
 cl <- makeCluster(n_workers)
 registerDoParallel(cl)
 
