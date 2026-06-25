@@ -52,11 +52,11 @@ $$
 `A_error/`, `K_error/`, `B_error/`, `convergence/`.
 
 > **Computational note:** Each tile is 7 424 × 7 424 pixels with 400 bands stacked
-> (20 ages × 20 realizations). Tiles are split into horizontal strips and
-> dispatched in parallel via `mclapply` (fork-based). Fitting uses `terra::app()`
-> so that rasters are read and written in memory-efficient chunks.
-> On SageMaker, run via the wrapper script as a background job to keep the
-> RStudio UI responsive.
+> (20 ages × 20 realizations). Tiles are dispatched in parallel (one `mclapply`
+> worker per tile). Fitting uses `terra::app()` so rasters are read and written
+> in memory-efficient chunks. On SageMaker, run via the wrapper script from the
+> terminal (`nohup Rscript cr_calc/cr_chapman_richards_wrapper.R`) to avoid
+> mclapply fork crashes inside RStudio Server.
 
 ---
 
@@ -125,10 +125,9 @@ n_bands <- 20                    # realizations per age file (sd_001 – sd_020)
 age_vector <- rep(ages, each = n_bands)
 
 # ── Parallelisation ────────────────────────────────────────────────────────────
-# One mclapply worker per tile (18 tiles). No strip splitting — each worker
-# processes a whole tile via app() which reads lazily in chunks. This avoids
-# crop() materialisation (35 GB per strip) and I/O contention (each worker
-# reads its own set of 20 input files).
+# One mclapply worker per tile (18 tiles). Each worker processes a whole tile
+# via app() which reads lazily in chunks. Each worker reads its own set of
+# 20 input files — no I/O contention between workers.
 n_tiles <- 18L
 n_cores <- max(1L, detectCores() - 1L)
 
@@ -314,10 +313,10 @@ fit_cr_pixel <- function(pix_y, age_v, max_pot) {
 #'                    Use n_cores in "pixel" strategy; 1L in "tile" strategy.
 #' @param test_crop_n  Integer. If > 0, auto-locate valid data and crop to a
 #'                     test_crop_n x test_crop_n pixel window. Smoke test only.
-#' @param crop_ext     SpatExtent or NULL. If provided, crop the stacked raster
-#'                     to this extent before fitting. Used for strip-based
-#'                     parallelism. Takes precedence over test_crop_n.
-#' @param strip_suffix Character suffix for output filenames (e.g. "_s01").
+#' @param crop_ext     Numeric vector c(xmin, xmax, ymin, ymax) or NULL.
+#'                     If provided, crop the stacked raster to this extent
+#'                     before fitting. Takes precedence over test_crop_n.
+#' @param strip_suffix Character suffix for output filenames (default "").
 #' @return Invisibly returns the tile_id on success.
 calc_cr_tile <- function(tile_id,
                          input_dir,
@@ -487,8 +486,6 @@ if (test_mode) {
 } else {
 
   # ── Production: one work unit per tile ──────────────────────────────────────
-  # No strip splitting — each worker processes a whole tile. This avoids
-  # crop() materialisation and I/O contention between workers.
   work_units <- lapply(all_tile_ids, function(tid) {
     list(tile_id = tid, crop_ext = NULL, strip_suffix = "")
   })
@@ -531,12 +528,12 @@ cat("Output directories ready under:", output_dir, "\n")
 
 ## 6. CR Parameter Fitting
 
-Parallel via `mclapply` (fork-based on Linux). Each forked worker inherits
-the parent session — no serialization, no socket connections. Run this via
-the wrapper script as a background job so the RStudio UI stays responsive.
+Parallel via `mclapply` (fork-based on Linux). One worker per tile (18 total).
+On SageMaker, run via the wrapper script from the terminal — **not** as an
+RStudio background job (mclapply fork crashes inside RStudio Server).
 
-Each worker logs every major step (with PID) to the shared log file, so you
-can `tail -f` the log to monitor progress across all workers simultaneously.
+Each worker logs every major step (with PID) to the shared log file.
+Monitor via `tail -f` on the log file path printed below.
 
 ```{r fit_parallel}
 n_workers <- min(n_cores, length(work_units))
@@ -777,5 +774,5 @@ if (!save_to_s3) {
 
 ---
 
-*To run the second scenario, change `scenario <- "hist"` in Section 2 and
-re-run the notebook (Knit, or run chunks interactively).*
+*To run the second scenario, change `scenario` in Section 2 and re-launch
+the wrapper from the terminal.*
