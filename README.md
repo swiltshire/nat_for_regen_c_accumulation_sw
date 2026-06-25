@@ -87,7 +87,9 @@ terra_mem_gb <- 500   # example for 768 GB instance
 ## Dependencies
 
 ```r
-install.packages(c("terra", "tidyverse", "parallel", "doParallel", "foreach", "tictoc"))
+install.packages(c("terra", "tidyverse", "minpack.lm"))
 ```
+
+`parallel` is included with base R.
 
 Tested on R ≥ 4.3. `terra` requires GDAL — ensure system dependencies are present.

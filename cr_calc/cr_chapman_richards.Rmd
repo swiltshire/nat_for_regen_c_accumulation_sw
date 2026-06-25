@@ -52,11 +52,11 @@ $$
 `A_error/`, `K_error/`, `B_error/`, `convergence/`.
 
 > **Computational note:** Each tile is 7 424 × 7 424 pixels with 400 bands stacked
-> (20 ages × 20 realizations). Processing is parallelized at the tile level
-> (`foreach` / `doParallel`). Fitting uses `terra::app()` so that rasters are
-> read and written in memory-efficient chunks rather than loaded all at once.
-> Expect long runtimes on full data — size the core count to available RAM
-> (≥16 GB recommended; 24+ cores optimal).
+> (20 ages × 20 realizations). Tiles are split into horizontal strips and
+> dispatched in parallel via `mclapply` (fork-based). Fitting uses `terra::app()`
+> so that rasters are read and written in memory-efficient chunks.
+> On SageMaker, run via the wrapper script as a background job to keep the
+> RStudio UI responsive.
 
 ---
 
@@ -67,10 +67,7 @@ required_packages <- c(
   "terra",
   "tidyverse",
   "minpack.lm",
-  "parallel",
-  "doParallel",
-  "foreach",
-  "tictoc"
+  "parallel"
 )
 
 new_pkgs <- required_packages[
@@ -123,34 +120,19 @@ n_bands <- 20                    # realizations per age file (sd_001 – sd_020)
 # producing a length-400 vector aligned to the stacked 400-band raster.
 age_vector <- rep(ages, each = n_bands)
 
-# ── Parallelisation strategy ───────────────────────────────────────────────────
-# Two modes:
-#
-#   "tile"  — one worker per tile (18 tiles max). Best when n_cores ≤ 18.
-#             Uses socket or fork clusters via doParallel/foreach.
-#
-#   "pixel" — tiles run sequentially; terra::app() parallelises across
-#             pixels within each tile using all available cores.
-#             Best on large instances (SageMaker ≥ 18 vCPUs) because it
-#             scales to any core count. On Linux, terra uses fork workers
-#             (zero-copy, no serialization overhead).
-#
-# Auto-select: use "pixel" when n_cores > n_tiles, else "tile".
-# NOTE: terra::app(cores=n) does not parallelise in the SageMaker Posit
-# environment (confirmed via /proc/loadavg). Force "tile" strategy, which
-# uses foreach socket workers — one tile per worker, 18 tiles in parallel.
-n_tiles  <- 18L   # total tiles per scenario
+# ── Parallelisation ────────────────────────────────────────────────────────────
+# Each tile is split into horizontal strips, and all strips are dispatched
+# via parallel::mclapply (fork-based on Linux). This gives one forked worker
+# per strip with no serialization overhead.
+n_tiles  <- 18L
 n_cores  <- max(1L, detectCores() - 1L)
-parallel_strategy <- "tile"
 
-# Each tile is split into horizontal strips so that total work units stays
-# under R's 128-connection limit while maximising core utilisation.
-n_max_workers     <- 80L
-n_strips_per_tile <- max(1L, floor(n_max_workers / n_tiles))
+# Strips per tile: total work units = n_tiles × n_strips_per_tile.
+# Keep total ≤ n_cores so every strip gets its own core.
+n_strips_per_tile <- max(1L, floor(n_cores / n_tiles))
 
-cat(sprintf("Cores available: %d | Strategy: %s | Strips/tile: %d | Work units: %d\n",
-            n_cores, parallel_strategy, n_strips_per_tile,
-            n_tiles * n_strips_per_tile))
+cat(sprintf("Cores available: %d | Strips/tile: %d | Work units: %d\n",
+            n_cores, n_strips_per_tile, n_tiles * n_strips_per_tile))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 # Maximum RAM (GB) terra may use per process when chunking raster I/O.
@@ -508,8 +490,7 @@ if (test_mode) {
 } else {
 
   # ── Production: split each tile into horizontal strips ──────────────────────
-  # This creates n_tiles × n_strips_per_tile work units so we can saturate all
-  # available cores via foreach, without relying on terra::app(cores=n).
+  # Creates n_tiles × n_strips_per_tile work units dispatched via mclapply.
   work_units <- lapply(all_tile_ids, function(tid) {
     # Read extent and resolution from one input file (lazy — no pixel data read)
     probe <- rast(file.path(input_dir, sprintf("age_005_%s.tif", tid)))
