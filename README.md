@@ -72,8 +72,8 @@ Server's multi-threaded environment.
 
 ```r
 test_mode    <- FALSE
-scenario     <- "hist"       # or "future"
-terra_mem_gb <- 250          # ~75% of instance RAM
+scenarios    <- c("hist", "future")   # both run in parallel (36 workers)
+terra_mem_gb <- 250                   # ~75% of instance RAM
 ```
 
 2. Launch from the **terminal** (not RStudio console):
@@ -81,11 +81,12 @@ terra_mem_gb <- 250          # ~75% of instance RAM
 ```bash
 cd /home/sagemaker-user/nat_for_regen_c_accumulation_sw
 nohup Rscript cr_calc/cr_chapman_richards_wrapper.R > wrapper.log 2>&1 &
-tail -f data/outputs/hist/progress_hist.log
+tail -f data/outputs/*/progress_*.log
 ```
 
-The job runs 18 parallel workers (one per tile) via `mclapply`. `nohup`
-ensures it survives disconnects. RStudio stays responsive.
+Both scenarios run simultaneously — 36 parallel workers (18 tiles × 2
+scenarios) via `mclapply`. `nohup` ensures it survives disconnects.
+RStudio stays responsive.
 
 **Recommended instance:** `ml.r5.12xlarge` (48 vCPUs, 384 GB RAM, ~$3.60/hr).
 

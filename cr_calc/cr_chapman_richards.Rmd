@@ -96,9 +96,9 @@ test_mode    <- FALSE
 test_crop_n  <- 150   # pixels per side when test_mode = TRUE
 
 # ── Scenario ──────────────────────────────────────────────────────────────────
-# Set to "future" or "hist" — controls which input directory is used.
-# To process both scenarios back-to-back, see Section 6.
-scenario <- "hist"
+# Scenarios to process. Use c("hist", "future") to run both in parallel
+# (doubles worker count to 36 but halves total wall time).
+scenarios <- c("hist", "future")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Notebook-relative root of the project (two levels up from cr_calc/).
@@ -111,9 +111,7 @@ if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable())
   project_root <- getwd()
 }
 
-input_dir  <- file.path(project_root, "data", "inputs",  scenario)
-output_dir <- file.path(project_root, "data", "outputs", scenario)
-log_file   <- file.path(output_dir, sprintf("progress_%s.log", scenario))
+# Paths are built per-scenario in the work_units chunk (Section 4).
 
 # ── Age sequence ──────────────────────────────────────────────────────────────
 # Ages (years) matching the input file naming convention (age_005, age_010, …)
@@ -146,10 +144,7 @@ terraOptions(memmax = terra_mem_gb)
 # FALSE → outputs stay local only (laptop / smoke test).
 save_to_s3 <- TRUE
 
-s3_output_dir <- sprintf(
-  "s3://sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data/%s/outputs",
-  scenario
-)
+s3_output_base <- "s3://sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data"
 ```
 
 ---
@@ -458,52 +453,60 @@ calc_cr_tile <- function(tile_id,
 
 ## 4. File Discovery
 
-```{r discovery}
-# ── List available input tiles ────────────────────────────────────────────────
-all_files <- list.files(input_dir, pattern = "\\.tif$")
-
-# Extract tile IDs: everything after "age_XXX_" and before ".tif"
-all_tile_ids <- unique(sub("^age_\\d+_(.+)\\.tif$", "\\1", all_files))
-
-cat(sprintf("Scenario: %s\n", scenario))
-cat(sprintf("Input directory: %s\n", input_dir))
-cat(sprintf("Tiles found: %d\n", length(all_tile_ids)))
-cat(sprintf("Ages found: %s\n",
-            paste(sort(unique(as.integer(
-              sub("^age_(\\d+)_.*$", "\\1", all_files)))), collapse = ", ")))
-```
-
 ```{r work_units}
 if (test_mode) {
 
-  # ── Smoke test: one tile, auto-locate crop ──────────────────────────────────
-  work_units <- list(list(tile_id = all_tile_ids[1],
-                          crop_ext = NULL,
-                          strip_suffix = ""))
-  cat(sprintf("[TEST MODE] 1 work unit (1 tile × %d×%d px crop)\n",
-              test_crop_n, test_crop_n))
+  # ── Smoke test: one tile from the first scenario, auto-locate crop ──────────
+  scn       <- scenarios[1]
+  input_dir <- file.path(project_root, "data", "inputs",  scn)
+  all_files <- list.files(input_dir, pattern = "\\.tif$")
+  all_tile_ids <- unique(sub("^age_\\d+_(.+)\\.tif$", "\\1", all_files))
+
+  work_units <- list(list(
+    tile_id      = all_tile_ids[1],
+    crop_ext     = NULL,
+    strip_suffix = "",
+    input_dir    = input_dir,
+    output_dir   = file.path(project_root, "data", "outputs", scn),
+    log_file     = file.path(project_root, "data", "outputs", scn,
+                             sprintf("progress_%s.log", scn)),
+    scenario     = scn
+  ))
+  cat(sprintf("[TEST MODE] 1 work unit (%s, 1 tile × %d×%d px crop)\n",
+              scn, test_crop_n, test_crop_n))
 
 } else {
 
-  # ── Production: one work unit per tile ──────────────────────────────────────
-  work_units <- lapply(all_tile_ids, function(tid) {
-    list(tile_id = tid, crop_ext = NULL, strip_suffix = "")
-  })
+  # ── Production: one work unit per tile × scenario ───────────────────────────
+  work_units <- unlist(lapply(scenarios, function(scn) {
+    input_dir  <- file.path(project_root, "data", "inputs",  scn)
+    output_dir <- file.path(project_root, "data", "outputs", scn)
+    log_file   <- file.path(output_dir, sprintf("progress_%s.log", scn))
 
-  # ── Skip already-completed tiles ────────────────────────────────────────────
-  completed_dir <- file.path(output_dir, "A")
-  if (dir.exists(completed_dir)) {
-    completed_files <- list.files(completed_dir, pattern = "\\.tif$")
-  } else {
-    completed_files <- character(0)
-  }
-  is_done <- vapply(work_units, function(wu) {
-    sprintf("A_%s.tif", wu$tile_id) %in% completed_files
-  }, logical(1))
-  work_units <- work_units[!is_done]
+    all_files    <- list.files(input_dir, pattern = "\\.tif$")
+    tile_ids     <- unique(sub("^age_\\d+_(.+)\\.tif$", "\\1", all_files))
 
-  cat(sprintf("Work units: %d remaining (%d already done)\n",
-              length(work_units), sum(is_done)))
+    cat(sprintf("Scenario: %s | Tiles: %d | Input: %s\n",
+                scn, length(tile_ids), input_dir))
+
+    # Skip completed tiles
+    completed_dir <- file.path(output_dir, "A")
+    completed_files <- if (dir.exists(completed_dir))
+      list.files(completed_dir, pattern = "\\.tif$") else character(0)
+
+    lapply(tile_ids, function(tid) {
+      if (sprintf("A_%s.tif", tid) %in% completed_files) return(NULL)
+      list(tile_id = tid, crop_ext = NULL, strip_suffix = "",
+           input_dir = input_dir, output_dir = output_dir,
+           log_file = log_file, scenario = scn)
+    })
+  }), recursive = FALSE)
+
+  # Remove NULLs (completed tiles)
+  work_units <- Filter(Negate(is.null), work_units)
+
+  cat(sprintf("\nTotal work units: %d across %d scenario(s)\n",
+              length(work_units), length(scenarios)))
 }
 ```
 
@@ -513,37 +516,43 @@ if (test_mode) {
 
 ```{r output_dirs}
 param_names <- c("A", "K", "B", "A_error", "K_error", "B_error", "convergence")
-param_dirs  <- file.path(output_dir, param_names)
-invisible(lapply(param_dirs, dir.create, recursive = TRUE, showWarnings = FALSE))
 
-file.create(log_file, showWarnings = FALSE)
-cat(sprintf("Run started: %s\nScenario: %s\nWork units: %d\n",
-            format(Sys.time()), scenario, length(work_units)),
-    file = log_file, append = TRUE)
-
-cat("Output directories ready under:", output_dir, "\n")
+# Create output dirs and log files for each scenario
+for (scn in scenarios) {
+  out_dir <- file.path(project_root, "data", "outputs", scn)
+  invisible(lapply(file.path(out_dir, param_names),
+                   dir.create, recursive = TRUE, showWarnings = FALSE))
+  lf <- file.path(out_dir, sprintf("progress_%s.log", scn))
+  file.create(lf, showWarnings = FALSE)
+  cat(sprintf("Run started: %s\nScenario: %s\n",
+              format(Sys.time()), scn), file = lf, append = TRUE)
+  cat(sprintf("Output directories ready: %s\n", out_dir))
+}
 ```
 
 ---
 
 ## 6. CR Parameter Fitting
 
-Parallel via `mclapply` (fork-based on Linux). One worker per tile (18 total).
+Parallel via `mclapply` (fork-based on Linux). One worker per tile per
+scenario. With two scenarios, that is 36 workers — each reading its own
+files with zero I/O contention.
+
 On SageMaker, run via the wrapper script from the terminal — **not** as an
 RStudio background job (mclapply fork crashes inside RStudio Server).
 
-Each worker logs every major step (with PID) to the shared log file.
-Monitor via `tail -f` on the log file path printed below.
+Monitor both scenario logs simultaneously:
+`tail -f data/outputs/*/progress_*.log`
 
 ```{r fit_parallel}
 n_workers <- min(n_cores, length(work_units))
 per_worker_mem <- max(1L, floor(terra_mem_gb / n_workers))
 
-cat(sprintf("=== CR fitting: %s ===\n", scenario))
+cat(sprintf("=== CR fitting ===\n"))
+cat(sprintf("  Scenarios:  %s\n", paste(scenarios, collapse = ", ")))
 cat(sprintf("  Work units: %d\n", length(work_units)))
-cat(sprintf("  Workers:    %d (of %d cores)\n", n_workers, actual_cores))
+cat(sprintf("  Workers:    %d (of %d cores)\n", n_workers, parallel::detectCores()))
 cat(sprintf("  Per-worker terra memmax: %d GB\n", per_worker_mem))
-cat(sprintf("  Log file: %s\n", log_file))
 cat(sprintf("  Started: %s\n", format(Sys.time())))
 
 results <- parallel::mclapply(work_units, function(wu) {
@@ -553,37 +562,32 @@ results <- parallel::mclapply(work_units, function(wu) {
   tryCatch(
     calc_cr_tile(
       tile_id      = wu$tile_id,
-      input_dir    = input_dir,
-      output_dir   = output_dir,
+      input_dir    = wu$input_dir,
+      output_dir   = wu$output_dir,
       ages         = ages,
       n_bands      = n_bands,
-      log_file     = log_file,
+      log_file     = wu$log_file,
       app_cores    = 1L,
       test_crop_n  = if (is.null(wu$crop_ext)) test_crop_n else 0L,
       crop_ext     = wu$crop_ext,
       strip_suffix = wu$strip_suffix
     ),
     error = function(e) {
-      msg <- sprintf("[%s%s | pid=%d] FATAL: %s\n",
-                     wu$tile_id, wu$strip_suffix, Sys.getpid(), conditionMessage(e))
-      cat(msg, file = log_file, append = TRUE)
+      msg <- sprintf("[%s/%s | pid=%d] FATAL: %s\n",
+                     wu$scenario, wu$tile_id, Sys.getpid(), conditionMessage(e))
+      cat(msg, file = wu$log_file, append = TRUE)
       conditionMessage(e)
     }
   )
 }, mc.cores = n_workers)
 
 # ── Report ────────────────────────────────────────────────────────────────
-n_ok   <- sum(vapply(results, is.character, logical(1)) &
-              vapply(results, function(x) !startsWith(x %||% "", "Error"), logical(1)),
-              na.rm = TRUE)
-n_null <- sum(vapply(results, is.null, logical(1)))
-n_err  <- length(results) - n_ok - n_null
-cat(sprintf("\n=== Done: %s | OK: %d | NULL: %d | Errors: %d | %s ===\n",
-            scenario, n_ok, n_null, n_err, format(Sys.time())))
+n_err <- sum(vapply(results, function(x) is.character(x), logical(1)))
+cat(sprintf("\n=== Done | %d work units | %d errors | %s ===\n",
+            length(results), n_err, format(Sys.time())))
 
-# Print any error messages
-errs <- Filter(function(x) is.character(x) && grepl("Error|error", x), results)
-if (length(errs) > 0) {
+if (n_err > 0) {
+  errs <- Filter(is.character, results)
   cat("\nErrors:\n")
   invisible(lapply(errs, function(e) cat("  ", e, "\n")))
 }
@@ -600,9 +604,11 @@ if (!test_mode) {
   library(ggplot2)
 
   # ── Reload the fitted parameter rasters ──────────────────────────────────────
-  wu       <- work_units[[1]]
-  tile_id  <- wu$tile_id
-  suffix   <- wu$strip_suffix
+  wu         <- work_units[[1]]
+  tile_id    <- wu$tile_id
+  suffix     <- wu$strip_suffix
+  output_dir <- wu$output_dir
+  input_dir  <- wu$input_dir
   a_path   <- file.path(output_dir, "A",           sprintf("A_%s%s.tif",           tile_id, suffix))
   k_path   <- file.path(output_dir, "K",           sprintf("K_%s%s.tif",           tile_id, suffix))
   b_path   <- file.path(output_dir, "B",           sprintf("B_%s%s.tif",           tile_id, suffix))
@@ -696,25 +702,21 @@ a single global raster for each parameter. Skip this section if you intend to
 mosaic in a separate step or in GEE.
 
 ```{r mosaic, eval=FALSE}
-mosaic_dir <- file.path(output_dir, "mosaic")
-dir.create(mosaic_dir, recursive = TRUE, showWarnings = FALSE)
+for (scn in scenarios) {
+  out_dir    <- file.path(project_root, "data", "outputs", scn)
+  mosaic_dir <- file.path(out_dir, "mosaic")
+  dir.create(mosaic_dir, recursive = TRUE, showWarnings = FALSE)
 
-for (param in param_names) {
-  tile_files <- list.files(file.path(output_dir, param),
-                            pattern = "\\.tif$", full.names = TRUE)
-  if (length(tile_files) == 0) {
-    message(sprintf("No output tiles found for parameter '%s' — skipping.", param))
-    next
+  for (param in param_names) {
+    tile_files <- list.files(file.path(out_dir, param),
+                              pattern = "\\.tif$", full.names = TRUE)
+    if (length(tile_files) == 0) next
+    tile_rasts  <- lapply(tile_files, rast)
+    mosaic_rast <- do.call(mosaic, c(tile_rasts, list(fun = "mean")))
+    out_mosaic  <- file.path(mosaic_dir, sprintf("%s_%s_global.tif", param, scn))
+    writeRaster(mosaic_rast, out_mosaic, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+    message(sprintf("Wrote: %s", out_mosaic))
   }
-
-  tile_rasts <- lapply(tile_files, rast)
-  mosaic_rast <- do.call(mosaic, c(tile_rasts, list(fun = "mean")))
-
-  out_mosaic <- file.path(mosaic_dir,
-                           sprintf("%s_%s_global.tif", param, scenario))
-  writeRaster(mosaic_rast, out_mosaic,
-              gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
-  message(sprintf("Wrote: %s", out_mosaic))
 }
 ```
 
@@ -723,23 +725,20 @@ for (param in param_names) {
 ## 9. Run Summary
 
 ```{r summary}
-# Count completed output tiles per parameter
-summary_tbl <- data.frame(
-  Parameter = param_names,
-  Tiles_written = sapply(param_names, function(p) {
-    length(list.files(file.path(output_dir, p), pattern = "\\.tif$"))
-  })
-)
+for (scn in scenarios) {
+  out_dir <- file.path(project_root, "data", "outputs", scn)
+  counts  <- sapply(param_names, function(p)
+    length(list.files(file.path(out_dir, p), pattern = "\\.tif$")))
 
-knitr::kable(summary_tbl,
-             caption = sprintf("Output tile counts — scenario: %s", scenario))
-```
+  cat(sprintf("\n%s: %d / 18 tiles complete\n", toupper(scn), min(counts)))
 
-```{r log_tail}
-# Show tail of progress log
-log_lines <- readLines(log_file)
-tail_n <- min(30, length(log_lines))
-cat(tail(log_lines, tail_n), sep = "\n")
+  lf <- file.path(out_dir, sprintf("progress_%s.log", scn))
+  if (file.exists(lf)) {
+    log_lines <- readLines(lf)
+    cat(tail(log_lines, 10), sep = "\n")
+    cat("\n")
+  }
+}
 ```
 
 ---
@@ -756,23 +755,17 @@ provides credentials automatically.
 if (!save_to_s3) {
   message("save_to_s3 is FALSE — skipping S3 sync.")
 } else {
-  cat(sprintf("Syncing %s outputs to S3...\n", scenario))
-  cat(sprintf("  From: %s\n", output_dir))
-  cat(sprintf("  To:   %s\n", s3_output_dir))
-
-  # rclone is used instead of aws CLI (not available in SageMaker Posit shell)
-  ret <- system2(
-    "rclone",
-    c("copy", output_dir, s3_output_dir, "--transfers", "20", "--progress"),
-    stdout = TRUE, stderr = TRUE
-  )
-
-  if (length(ret) > 0) cat(ret, sep = "\n")
-  cat(sprintf("\nDone — %s outputs synced to S3.\n", scenario))
+  for (scn in scenarios) {
+    out_dir <- file.path(project_root, "data", "outputs", scn)
+    s3_dest <- sprintf("%s/%s/outputs", s3_output_base, scn)
+    cat(sprintf("Syncing %s: %s -> %s\n", scn, out_dir, s3_dest))
+    system2("rclone", c("copy", out_dir, s3_dest, "--transfers", "20", "--progress"),
+            stdout = TRUE, stderr = TRUE)
+    cat(sprintf("Done: %s\n", scn))
+  }
 }
 ```
 
 ---
 
-*To run the second scenario, change `scenario` in Section 2 and re-launch
-the wrapper from the terminal.*
+*Both scenarios run in a single launch when `scenarios <- c("hist", "future")`.*
