@@ -141,7 +141,13 @@ n_tiles  <- 18L   # total tiles per scenario
 n_cores  <- max(1L, detectCores() - 1L)
 parallel_strategy <- "tile"
 
-cat(sprintf("Cores available: %d | Strategy: %s\n", n_cores, parallel_strategy))
+# In tile strategy, each tile is split into horizontal strips so that
+# total work units ≈ n_cores (90 strips across 18 tiles on a 96-core machine).
+n_strips_per_tile <- max(1L, floor(n_cores / n_tiles))
+
+cat(sprintf("Cores available: %d | Strategy: %s | Strips/tile: %d | Work units: %d\n",
+            n_cores, parallel_strategy, n_strips_per_tile,
+            n_tiles * n_strips_per_tile))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 # Maximum RAM (GB) terra may use per process when chunking raster I/O.
@@ -323,18 +329,23 @@ fit_cr_pixel <- function(pix_y, age_v, max_pot) {
 #' @param log_file  Path to log file for progress messages.
 #' @param app_cores   Integer number of cores to pass to terra::app().
 #'                    Use n_cores in "pixel" strategy; 1L in "tile" strategy.
-#' @param test_crop_n Integer. If > 0, crop the stacked raster to a
-#'                    test_crop_n x test_crop_n pixel window before fitting.
-#'                    Use for smoke tests only.
+#' @param test_crop_n  Integer. If > 0, auto-locate valid data and crop to a
+#'                     test_crop_n x test_crop_n pixel window. Smoke test only.
+#' @param crop_ext     SpatExtent or NULL. If provided, crop the stacked raster
+#'                     to this extent before fitting. Used for strip-based
+#'                     parallelism. Takes precedence over test_crop_n.
+#' @param strip_suffix Character suffix for output filenames (e.g. "_s01").
 #' @return Invisibly returns the tile_id on success.
 calc_cr_tile <- function(tile_id,
                          input_dir,
                          output_dir,
-                         ages        = seq(5, 100, by = 5),
-                         n_bands     = 20,
-                         log_file    = NULL,
-                         app_cores   = 1L,
-                         test_crop_n = 0L) {
+                         ages         = seq(5, 100, by = 5),
+                         n_bands      = 20,
+                         log_file     = NULL,
+                         app_cores    = 1L,
+                         test_crop_n  = 0L,
+                         crop_ext     = NULL,
+                         strip_suffix = "") {
 
   age_v <- rep(ages, each = n_bands)  # predictor vector, length 400
 
@@ -354,8 +365,10 @@ calc_cr_tile <- function(tile_id,
   # ── Stack into a 400-band SpatRaster (lazy — not read into RAM yet) ──────────
   agc_stack <- rast(age_files)  # terra stacks bands in file order (age order)
 
-  # ── Optional: crop to a small window for smoke testing ───────────────────────
-  if (test_crop_n > 0) {
+  # ── Optional: crop to strip extent or smoke-test window ──────────────────────
+  if (!is.null(crop_ext)) {
+    agc_stack <- crop(agc_stack, crop_ext)
+  } else if (test_crop_n > 0) {
     # Locate valid data: aggregate one layer coarsely to find a non-zero region,
     # then centre the crop window on the densest block.
     probe   <- rast(age_files[length(age_files)])[[1]]  # last age, first band
@@ -393,7 +406,7 @@ calc_cr_tile <- function(tile_id,
     agc_stack <- crop(agc_stack, crop_ext)
     message(msg_crop)
     if (!is.null(log_file)) cat(msg_crop, file = log_file, append = TRUE)
-  }
+  }  # end test_crop_n
 
   # ── Define the pixel-wise fitting function (fully self-contained closure) ────
   #
@@ -449,8 +462,9 @@ calc_cr_tile <- function(tile_id,
   })
 
   # ── Apply pixel-wise (terra handles chunked I/O) ─────────────────────────────
+  label <- paste0(tile_id, strip_suffix)
   msg_start <- sprintf("[%s] Starting CR fit — %s\n",
-                       tile_id, format(Sys.time(), "%H:%M:%S"))
+                       label, format(Sys.time(), "%H:%M:%S"))
   if (!is.null(log_file)) cat(msg_start, file = log_file, append = TRUE)
 
   # app_cores > 1 uses terra's built-in parallelism (fork on Linux, socket on Windows)
@@ -463,13 +477,13 @@ calc_cr_tile <- function(tile_id,
 
   for (param in names(result)) {
     out_path <- file.path(output_dir, param,
-                          sprintf("%s_%s.tif", param, tile_id))
+                          sprintf("%s_%s%s.tif", param, tile_id, strip_suffix))
     writeRaster(result[[param]], out_path,
                 gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
   }
 
   msg_done <- sprintf("[%s] Complete — %s\n",
-                      tile_id, format(Sys.time(), "%H:%M:%S"))
+                      label, format(Sys.time(), "%H:%M:%S"))
   message(msg_done)
   if (!is.null(log_file)) cat(msg_done, file = log_file, append = TRUE)
 
@@ -496,34 +510,55 @@ cat(sprintf("Ages found: %s\n",
               sub("^age_(\\d+)_.*$", "\\1", all_files)))), collapse = ", ")))
 ```
 
-```{r completed}
-# ── Identify already-completed tiles (check for A output as proxy) ────────────
-completed_dir <- file.path(output_dir, "A")
-if (dir.exists(completed_dir)) {
-  completed_files <- list.files(completed_dir, pattern = "\\.tif$")
-  completed_ids <- sub("^A_(.+)\\.tif$", "\\1", completed_files)
-} else {
-  completed_ids <- character(0)
-}
-
-todo_ids <- setdiff(all_tile_ids, completed_ids)
-
-cat(sprintf("Already completed: %d tile(s)\n", length(completed_ids)))
-cat(sprintf("Remaining to run:  %d tile(s)\n", length(todo_ids)))
-```
-
-```{r subset_optional}
+```{r work_units}
 if (test_mode) {
-  # Use one tile only; the crop happens inside calc_cr_tile via test_crop_n.
-  g_ids <- all_tile_ids[1]
-  cat(sprintf("[TEST MODE] Running 1 tile × %d×%d pixels\n",
+
+  # ── Smoke test: one tile, auto-locate crop, no strip splitting ──────────────
+  work_units <- list(list(tile_id = all_tile_ids[1],
+                          crop_ext = NULL,
+                          strip_suffix = ""))
+  cat(sprintf("[TEST MODE] 1 work unit (1 tile × %d×%d px crop)\n",
               test_crop_n, test_crop_n))
+
 } else {
-  # Production: run all remaining tiles. Adjust start/end for batching.
-  start_idx <- 1
-  end_idx   <- length(todo_ids)
-  g_ids     <- todo_ids[start_idx:end_idx]
-  cat(sprintf("Tiles queued for this run: %d\n", length(g_ids)))
+
+  # ── Production: split each tile into horizontal strips ──────────────────────
+  # This creates n_tiles × n_strips_per_tile work units so we can saturate all
+  # available cores via foreach, without relying on terra::app(cores=n).
+  work_units <- lapply(all_tile_ids, function(tid) {
+    # Read extent and resolution from one input file (lazy — no pixel data read)
+    probe <- rast(file.path(input_dir, sprintf("age_005_%s.tif", tid)))
+    e     <- ext(probe)
+    ry    <- res(probe)[2]
+    nr    <- nrow(probe)
+    rows_per_strip <- ceiling(nr / n_strips_per_tile)
+
+    lapply(seq_len(n_strips_per_tile), function(s) {
+      row_start <- (s - 1L) * rows_per_strip + 1L
+      row_end   <- min(s * rows_per_strip, nr)
+      y_top     <- e[4] - (row_start - 1L) * ry
+      y_bot     <- e[4] - row_end * ry
+      list(tile_id      = tid,
+           crop_ext     = ext(e[1], e[2], y_bot, y_top),
+           strip_suffix = sprintf("_s%02d", s))
+    })
+  }) |> unlist(recursive = FALSE)
+
+  # ── Skip already-completed work units ───────────────────────────────────────
+  completed_dir <- file.path(output_dir, "A")
+  if (dir.exists(completed_dir)) {
+    completed_files <- list.files(completed_dir, pattern = "\\.tif$")
+  } else {
+    completed_files <- character(0)
+  }
+  is_done <- sapply(work_units, function(wu) {
+    fname <- sprintf("A_%s%s.tif", wu$tile_id, wu$strip_suffix)
+    fname %in% completed_files
+  })
+  work_units <- work_units[!is_done]
+
+  cat(sprintf("Work units: %d remaining (%d already done)\n",
+              length(work_units), sum(is_done)))
 }
 ```
 
@@ -537,8 +572,8 @@ param_dirs  <- file.path(output_dir, param_names)
 invisible(lapply(param_dirs, dir.create, recursive = TRUE, showWarnings = FALSE))
 
 file.create(log_file, showWarnings = FALSE)
-cat(sprintf("Run started: %s\nScenario: %s\nTiles: %s\n",
-            format(Sys.time()), scenario, paste(g_ids, collapse = ", ")),
+cat(sprintf("Run started: %s\nScenario: %s\nWork units: %d\n",
+            format(Sys.time()), scenario, length(work_units)),
     file = log_file, append = TRUE)
 
 cat("Output directories ready under:", output_dir, "\n")
@@ -548,78 +583,49 @@ cat("Output directories ready under:", output_dir, "\n")
 
 ## 6. CR Parameter Fitting
 
-Two execution paths depending on `parallel_strategy` (set in Section 2):
+Each work unit (tile × strip) is dispatched to a socket-cluster worker via
+`foreach %dopar%`. With 18 tiles × 5 strips/tile = 90 work units, this keeps
+~90 cores busy without relying on `terra::app()` internal parallelism.
 
-- **`"pixel"`** (recommended for SageMaker): tiles run sequentially; `terra::app()`
-  uses all cores to parallelise across pixels within each tile. On Linux, terra
-  fork-spawns workers — no serialization, shared memory, maximum throughput.
-- **`"tile"`**: one tile per socket-cluster worker via `foreach %dopar%`. Each worker
-  runs `app()` single-threaded. Best when you have ≤ 18 cores.
-
-To process both scenarios back-to-back, wrap the chunk below in
-`for (scenario in c("future", "hist")) { ... }` and rebuild `input_dir`,
-`output_dir`, and `g_ids` at the top of each iteration.
+To process both scenarios back-to-back, change `scenario` in Section 2 and
+re-run from Section 2 onward.
 
 ```{r fit_parallel}
-tic(sprintf("CR fitting — %s (%s strategy)", scenario, parallel_strategy))
+tic(sprintf("CR fitting — %s (%d work units)", scenario, length(work_units)))
 
-if (parallel_strategy == "pixel") {
+n_workers <- min(n_cores, length(work_units))
+cl <- makeCluster(n_workers)
+registerDoParallel(cl)
 
-  # ── Pixel strategy: sequential tiles, terra handles parallelism ─────────────
-  # terra::app(cores = n) on Linux uses fork workers — functions and data are
-  # inherited from the parent process automatically (no clusterExport needed).
-  # On Windows, terra falls back to a socket cluster and requires the function
-  # to be self-contained; the closures defined above satisfy this.
-  for (tile_id in g_ids) {
-    calc_cr_tile(
-      tile_id     = tile_id,
-      input_dir   = input_dir,
-      output_dir  = output_dir,
-      ages        = ages,
-      n_bands     = n_bands,
-      log_file    = log_file,
-      app_cores   = n_cores,
-      test_crop_n = if (test_mode) test_crop_n else 0L
-    )
-  }
-
-} else {
-
-  # ── Tile strategy: one worker per tile via foreach / doParallel ─────────────
-  # Socket clusters are used so this works on both Linux and Windows.
-  # Each worker receives copies of all needed objects via clusterExport.
-  n_tile_workers <- min(n_cores, length(g_ids))
-  cl <- makeCluster(n_tile_workers)
-  registerDoParallel(cl)
-
-  clusterExport(
-    cl,
-    varlist = c(
-      "calc_cr_tile", "attempt_nls", "fit_cr_pixel", "chapman_richards",
-      "input_dir", "output_dir", "ages", "n_bands", "log_file", "terra_mem_gb"
-    )
+clusterExport(
+  cl,
+  varlist = c(
+    "calc_cr_tile", "attempt_nls", "fit_cr_pixel", "chapman_richards",
+    "input_dir", "output_dir", "ages", "n_bands", "log_file", "terra_mem_gb"
   )
-  clusterEvalQ(cl, {
-    library(terra)
-    terraOptions(memmax = terra_mem_gb)
-  })
+)
+clusterEvalQ(cl, {
+  library(terra)
+  terraOptions(memmax = terra_mem_gb)
+})
 
-  foreach(tile_id = g_ids, .packages = "terra") %dopar% {
-    calc_cr_tile(
-      tile_id     = tile_id,
-      input_dir   = input_dir,
-      output_dir  = output_dir,
-      ages        = ages,
-      n_bands     = n_bands,
-      log_file    = log_file,
-      app_cores   = 1L,
-      test_crop_n = if (test_mode) test_crop_n else 0L
-    )
-  }
-
-  parallel::stopCluster(cl)
-  rm(cl)
+foreach(wu = work_units, .packages = "terra") %dopar% {
+  calc_cr_tile(
+    tile_id      = wu$tile_id,
+    input_dir    = input_dir,
+    output_dir   = output_dir,
+    ages         = ages,
+    n_bands      = n_bands,
+    log_file     = log_file,
+    app_cores    = 1L,
+    test_crop_n  = if (is.null(wu$crop_ext)) test_crop_n else 0L,
+    crop_ext     = wu$crop_ext,
+    strip_suffix = wu$strip_suffix
+  )
 }
+
+parallel::stopCluster(cl)
+rm(cl)
 
 toc()
 gc()
