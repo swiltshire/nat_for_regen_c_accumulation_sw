@@ -125,23 +125,14 @@ n_bands <- 20                    # realizations per age file (sd_001 – sd_020)
 age_vector <- rep(ages, each = n_bands)
 
 # ── Parallelisation ────────────────────────────────────────────────────────────
-# Each tile is split into horizontal strips, and all strips are dispatched
-# via parallel::mclapply (fork-based on Linux). This gives one forked worker
-# per strip with no serialization overhead.
-n_tiles  <- 18L
-n_cores  <- max(1L, detectCores() - 1L)
+# One mclapply worker per tile (18 tiles). No strip splitting — each worker
+# processes a whole tile via app() which reads lazily in chunks. This avoids
+# crop() materialisation (35 GB per strip) and I/O contention (each worker
+# reads its own set of 20 input files).
+n_tiles <- 18L
+n_cores <- max(1L, detectCores() - 1L)
 
-# Strips per tile: total work units = n_tiles × n_strips_per_tile.
-n_strips_per_tile <- max(1L, floor(n_cores / n_tiles))
-
-# Max simultaneous mclapply workers. When run via Rscript (outside RStudio
-# Server), forking is safe and memory is the only constraint. Each worker
-# uses ~3-5 GB actual RAM. On ml.m5.24xlarge (384 GB): 40 workers ≈ 160 GB.
-# Increase once confirmed stable.
-max_workers <- 40L
-
-cat(sprintf("Cores: %d | Strips/tile: %d | Work units: %d | Max workers: %d\n",
-            n_cores, n_strips_per_tile, n_tiles * n_strips_per_tile, max_workers))
+cat(sprintf("Cores: %d | Tiles: %d (one worker per tile)\n", n_cores, n_tiles))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 # Total terra memory budget (GB) shared across all workers.
@@ -486,7 +477,7 @@ cat(sprintf("Ages found: %s\n",
 ```{r work_units}
 if (test_mode) {
 
-  # ── Smoke test: one tile, auto-locate crop, no strip splitting ──────────────
+  # ── Smoke test: one tile, auto-locate crop ──────────────────────────────────
   work_units <- list(list(tile_id = all_tile_ids[1],
                           crop_ext = NULL,
                           strip_suffix = ""))
@@ -495,31 +486,14 @@ if (test_mode) {
 
 } else {
 
-  # ── Production: split each tile into horizontal strips ──────────────────────
-  # Creates n_tiles × n_strips_per_tile work units dispatched via mclapply.
+  # ── Production: one work unit per tile ──────────────────────────────────────
+  # No strip splitting — each worker processes a whole tile. This avoids
+  # crop() materialisation and I/O contention between workers.
   work_units <- lapply(all_tile_ids, function(tid) {
-    # Read extent and resolution from one input file (lazy — no pixel data read)
-    probe <- rast(file.path(input_dir, sprintf("age_005_%s.tif", tid)))
-    e     <- ext(probe)
-    ry    <- res(probe)[2]
-    nr    <- nrow(probe)
-    rows_per_strip <- ceiling(nr / n_strips_per_tile)
+    list(tile_id = tid, crop_ext = NULL, strip_suffix = "")
+  })
 
-    lapply(seq_len(n_strips_per_tile), function(s) {
-      row_start <- (s - 1L) * rows_per_strip + 1L
-      row_end   <- min(s * rows_per_strip, nr)
-      y_top     <- e[4] - (row_start - 1L) * ry
-      y_bot     <- e[4] - row_end * ry
-      # Store extent as plain numeric vector (not SpatExtent) so it
-      # survives serialization to socket workers. Reconstructed in
-      # calc_cr_tile via terra::ext().
-      list(tile_id      = tid,
-           crop_ext     = c(e[1], e[2], y_bot, y_top),
-           strip_suffix = sprintf("_s%02d", s))
-    })
-  }) |> unlist(recursive = FALSE)
-
-  # ── Skip already-completed work units ───────────────────────────────────────
+  # ── Skip already-completed tiles ────────────────────────────────────────────
   completed_dir <- file.path(output_dir, "A")
   if (dir.exists(completed_dir)) {
     completed_files <- list.files(completed_dir, pattern = "\\.tif$")
@@ -527,8 +501,7 @@ if (test_mode) {
     completed_files <- character(0)
   }
   is_done <- vapply(work_units, function(wu) {
-    fname <- sprintf("A_%s%s.tif", wu$tile_id, wu$strip_suffix)
-    fname %in% completed_files
+    sprintf("A_%s.tif", wu$tile_id) %in% completed_files
   }, logical(1))
   work_units <- work_units[!is_done]
 
@@ -566,17 +539,7 @@ Each worker logs every major step (with PID) to the shared log file, so you
 can `tail -f` the log to monitor progress across all workers simultaneously.
 
 ```{r fit_parallel}
-n_workers <- min(n_cores, length(work_units), max_workers)
-
-# ── Guard: instance must have enough cores ─────────────────────────────────
-actual_cores <- parallel::detectCores()
-if (actual_cores < length(work_units)) {
-  stop(sprintf(
-    "Instance has %d cores but %d work units. Need a larger instance or fewer strips.\n  Instance type should be ml.m5.24xlarge or similar (96 vCPUs).",
-    actual_cores, length(work_units)
-  ))
-}
-
+n_workers <- min(n_cores, length(work_units))
 per_worker_mem <- max(1L, floor(terra_mem_gb / n_workers))
 
 cat(sprintf("=== CR fitting: %s ===\n", scenario))
