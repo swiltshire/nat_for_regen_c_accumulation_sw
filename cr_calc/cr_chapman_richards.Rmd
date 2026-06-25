@@ -123,17 +123,18 @@ n_bands <- 20                    # realizations per age file (sd_001 – sd_020)
 age_vector <- rep(ages, each = n_bands)
 
 # ── Parallelisation ────────────────────────────────────────────────────────────
-# One mclapply worker per tile (18 tiles). Each worker processes a whole tile
-# via app() which reads lazily in chunks. Each worker reads its own set of
-# 20 input files — no I/O contention between workers.
+# One mclapply worker per tile per scenario. Each worker processes a whole
+# tile via app() which reads lazily in chunks. Each worker reads its own set
+# of 20 input files — no I/O contention between workers.
 n_tiles <- 18L
 n_cores <- max(1L, detectCores() - 1L)
 
-cat(sprintf("Cores: %d | Tiles: %d (one worker per tile)\n", n_cores, n_tiles))
+cat(sprintf("Cores: %d | Workers: %d (%d tiles × %d scenarios)\n",
+            n_cores, n_tiles * length(scenarios), n_tiles, length(scenarios)))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 # Total terra memory budget (GB) shared across all workers.
-# ml.m5.24xlarge = 384 GB: use ~250 GB, leaving headroom for R + OS.
+# ml.r5.12xlarge = 384 GB: use ~250 GB, leaving headroom for R + OS.
 # Each mclapply worker sets its own memmax = floor(terra_mem_gb / n_workers).
 terra_mem_gb <- 250
 terraOptions(memmax = terra_mem_gb)
