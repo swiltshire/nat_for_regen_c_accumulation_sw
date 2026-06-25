@@ -134,9 +134,12 @@ age_vector <- rep(ages, each = n_bands)
 #             (zero-copy, no serialization overhead).
 #
 # Auto-select: use "pixel" when n_cores > n_tiles, else "tile".
+# NOTE: terra::app(cores=n) does not parallelise in the SageMaker Posit
+# environment (confirmed via /proc/loadavg). Force "tile" strategy, which
+# uses foreach socket workers — one tile per worker, 18 tiles in parallel.
 n_tiles  <- 18L   # total tiles per scenario
 n_cores  <- max(1L, detectCores() - 1L)
-parallel_strategy <- if (n_cores > n_tiles) "pixel" else "tile"
+parallel_strategy <- "tile"
 
 cat(sprintf("Cores available: %d | Strategy: %s\n", n_cores, parallel_strategy))
 
