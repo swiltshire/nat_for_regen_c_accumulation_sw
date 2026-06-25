@@ -776,9 +776,15 @@ if (!save_to_s3) {
     out_dir <- file.path(project_root, "data", "outputs", scn)
     s3_dest <- sprintf("%s/%s/outputs", s3_output_base, scn)
     cat(sprintf("Syncing %s: %s -> %s\n", scn, out_dir, s3_dest))
-    system2("rclone", c("copy", out_dir, s3_dest, "--transfers", "20", "--progress"),
-            stdout = TRUE, stderr = TRUE)
-    cat(sprintf("Done: %s\n", scn))
+    tryCatch({
+      ret <- system2("rclone", c("copy", out_dir, s3_dest, "--transfers", "20"),
+                      stdout = TRUE, stderr = TRUE)
+      cat(sprintf("Done: %s\n", scn))
+    }, error = function(e) {
+      cat(sprintf("S3 sync failed for %s: %s\n", scn, conditionMessage(e)))
+      cat("Run manually from terminal:\n")
+      cat(sprintf("  rclone copy %s %s --transfers 20 --progress\n", out_dir, s3_dest))
+    })
   }
 }
 ```
