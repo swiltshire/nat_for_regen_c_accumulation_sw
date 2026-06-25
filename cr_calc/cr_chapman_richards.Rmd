@@ -601,24 +601,16 @@ re-run from Section 2 onward.
 tic(sprintf("CR fitting — %s (%d work units)", scenario, length(work_units)))
 
 n_workers <- min(n_cores, length(work_units))
-cat(sprintf("Launching %d workers for %d work units\n", n_workers, length(work_units)))
-cl <- makeCluster(n_workers)
-registerDoParallel(cl)
+cat(sprintf("Running %d work units with %d forked workers\n",
+            length(work_units), n_workers))
 
-clusterExport(
-  cl,
-  varlist = c(
-    "calc_cr_tile", "attempt_nls", "fit_cr_pixel", "chapman_richards",
-    "input_dir", "output_dir", "ages", "n_bands", "log_file", "terra_mem_gb"
-  )
-)
-clusterEvalQ(cl, {
+# mclapply uses fork on Linux — child processes inherit the parent's memory
+# directly (no serialization), which avoids the "external pointer is not valid"
+# error that occurs when foreach socket clusters try to serialize terra objects.
+results <- parallel::mclapply(work_units, function(wu) {
   library(terra)
   library(minpack.lm)
   terraOptions(memmax = terra_mem_gb)
-})
-
-foreach(wu = work_units, .packages = c("terra", "minpack.lm")) %dopar% {
   calc_cr_tile(
     tile_id      = wu$tile_id,
     input_dir    = input_dir,
@@ -631,10 +623,13 @@ foreach(wu = work_units, .packages = c("terra", "minpack.lm")) %dopar% {
     crop_ext     = wu$crop_ext,
     strip_suffix = wu$strip_suffix
   )
-}
+}, mc.cores = n_workers)
 
-parallel::stopCluster(cl)
-rm(cl)
+# Check for errors
+errors <- sapply(results, inherits, "try-error")
+if (any(errors)) {
+  warning(sprintf("%d of %d work units failed", sum(errors), length(results)))
+}
 
 toc()
 gc()
