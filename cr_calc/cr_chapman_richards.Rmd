@@ -129,11 +129,16 @@ n_tiles  <- 18L
 n_cores  <- max(1L, detectCores() - 1L)
 
 # Strips per tile: total work units = n_tiles × n_strips_per_tile.
-# Keep total ≤ n_cores so every strip gets its own core.
 n_strips_per_tile <- max(1L, floor(n_cores / n_tiles))
 
-cat(sprintf("Cores available: %d | Strips/tile: %d | Work units: %d\n",
-            n_cores, n_strips_per_tile, n_tiles * n_strips_per_tile))
+# Max simultaneous workers. mclapply processes work units in batches of this
+# size. Start conservative — each forked worker uses 3-5 GB of actual RAM
+# (beyond terra's memmax budget), so 72 workers can exhaust even 384 GB.
+# Increase gradually once runs are stable.
+max_workers <- 20L
+
+cat(sprintf("Cores: %d | Strips/tile: %d | Work units: %d | Max workers: %d\n",
+            n_cores, n_strips_per_tile, n_tiles * n_strips_per_tile, max_workers))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 # Total terra memory budget (GB) shared across all workers.
@@ -558,7 +563,7 @@ Each worker logs every major step (with PID) to the shared log file, so you
 can `tail -f` the log to monitor progress across all workers simultaneously.
 
 ```{r fit_parallel}
-n_workers <- min(n_cores, length(work_units))
+n_workers <- min(n_cores, length(work_units), max_workers)
 
 # ── Guard: instance must have enough cores ─────────────────────────────────
 actual_cores <- parallel::detectCores()
