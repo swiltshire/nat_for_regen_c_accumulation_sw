@@ -607,10 +607,14 @@ cat(sprintf("Running %d work units with %d forked workers\n",
 # mclapply uses fork on Linux — child processes inherit the parent's memory
 # directly (no serialization), which avoids the "external pointer is not valid"
 # error that occurs when foreach socket clusters try to serialize terra objects.
+# Per-worker memory: divide available RAM across workers, leave 20% for OS
+per_worker_mem <- max(1L, floor(terra_mem_gb * 0.8 / n_workers))
+cat(sprintf("Per-worker terra memmax: %d GB\n", per_worker_mem))
+
 results <- parallel::mclapply(work_units, function(wu) {
   library(terra)
   library(minpack.lm)
-  terraOptions(memmax = terra_mem_gb)
+  terraOptions(memmax = per_worker_mem)
   calc_cr_tile(
     tile_id      = wu$tile_id,
     input_dir    = input_dir,
