@@ -558,10 +558,10 @@ if (test_mode) {
   } else {
     completed_files <- character(0)
   }
-  is_done <- sapply(work_units, function(wu) {
+  is_done <- vapply(work_units, function(wu) {
     fname <- sprintf("A_%s%s.tif", wu$tile_id, wu$strip_suffix)
     fname %in% completed_files
-  })
+  }, logical(1))
   work_units <- work_units[!is_done]
 
   cat(sprintf("Work units: %d remaining (%d already done)\n",
