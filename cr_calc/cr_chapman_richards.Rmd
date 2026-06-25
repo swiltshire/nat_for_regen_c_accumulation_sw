@@ -590,56 +590,78 @@ cat("Output directories ready under:", output_dir, "\n")
 
 ## 6. CR Parameter Fitting
 
-Each work unit runs as an **independent `Rscript` process** launched from bash.
-No R-level parallelism (no fork, no sockets, no serialization). Each process
-loads its own R, terra, and minpack.lm instance, processes one strip, and exits.
-This is the most robust approach for SageMaker Posit.
+### 6.1 Sequential run (diagnostic / production)
 
-### 6.1 Generate job commands
+Processes work units one at a time. No parallelism — simple, debuggable, and
+works as a background job via the wrapper script. When run via the wrapper,
+the RStudio UI stays responsive.
 
-```{r generate_jobs}
-jobs_file <- file.path(project_root, sprintf("jobs_%s.txt", scenario))
+For production, this processes all 72 strips sequentially. To parallelise,
+see Section 6.2.
 
-job_lines <- vapply(work_units, function(wu) {
-  sprintf(
-    'cd %s && Rscript cr_calc/run_strip.R "%s" %s "%s" "%s" "%s" "%s"',
-    project_root,
-    wu$tile_id,
-    paste(wu$crop_ext, collapse = " "),
-    wu$strip_suffix,
-    input_dir,
-    output_dir,
-    log_file
+```{r fit_sequential}
+cat(sprintf("=== CR fitting: %s | %d work units ===\n", scenario, length(work_units)))
+
+for (i in seq_along(work_units)) {
+  wu <- work_units[[i]]
+  label <- paste0(wu$tile_id, wu$strip_suffix)
+
+  cat(sprintf("\n[%d/%d] %s — started %s\n",
+              i, length(work_units), label, format(Sys.time(), "%H:%M:%S")))
+
+  tryCatch({
+    calc_cr_tile(
+      tile_id      = wu$tile_id,
+      input_dir    = input_dir,
+      output_dir   = output_dir,
+      ages         = ages,
+      n_bands      = n_bands,
+      log_file     = log_file,
+      app_cores    = 1L,
+      test_crop_n  = if (is.null(wu$crop_ext)) test_crop_n else 0L,
+      crop_ext     = wu$crop_ext,
+      strip_suffix = wu$strip_suffix
+    )
+    cat(sprintf("[%d/%d] %s — DONE %s\n",
+                i, length(work_units), label, format(Sys.time(), "%H:%M:%S")))
+  }, error = function(e) {
+    cat(sprintf("[%d/%d] %s — ERROR: %s\n",
+                i, length(work_units), label, conditionMessage(e)))
+  })
+}
+
+cat(sprintf("\n=== All work units processed — %s ===\n", format(Sys.time())))
+```
+
+### 6.2 Parallel run (optional, after sequential is confirmed working)
+
+Once Section 6.1 has completed at least one strip successfully, you can
+switch to `parallel::mclapply` for the remaining strips. Set `n_par_workers`
+conservatively — start with 4 and increase if stable.
+
+```{r fit_parallel, eval=FALSE}
+n_par_workers <- 4L   # start small, increase if stable
+per_worker_mem <- max(1L, floor(terra_mem_gb / n_par_workers))
+
+results <- parallel::mclapply(work_units, function(wu) {
+  library(terra)
+  library(minpack.lm)
+  terraOptions(memmax = per_worker_mem)
+  tryCatch(
+    calc_cr_tile(
+      tile_id      = wu$tile_id,
+      input_dir    = input_dir,
+      output_dir   = output_dir,
+      ages         = ages,
+      n_bands      = n_bands,
+      log_file     = log_file,
+      app_cores    = 1L,
+      crop_ext     = wu$crop_ext,
+      strip_suffix = wu$strip_suffix
+    ),
+    error = function(e) conditionMessage(e)
   )
-}, character(1))
-
-writeLines(job_lines, jobs_file)
-cat(sprintf("Wrote %d jobs to %s\n", length(job_lines), jobs_file))
-```
-
-### 6.2 Launch all strips
-
-Run this chunk, or copy the command into the **Terminal** tab. The R session
-stays responsive — all work happens in background Rscript processes.
-
-Each process uses ~200–500 MB of RAM. With 72 processes on a 192 GB instance,
-total memory demand is ~30–40 GB — well within budget.
-
-Monitor progress via the log file from the terminal:
-`tail -f data/outputs/{scenario}/progress_{scenario}.log`
-
-```{bash run_jobs, eval=FALSE}
-# Run all strips in parallel as independent Rscript processes.
-# Adjust -P to control how many run simultaneously (default: 72).
-cat jobs_hist.txt | xargs -P72 -I{} bash -c '{}' 2>&1 | tee run_hist.log
-```
-
-If the bash chunk doesn't work in RStudio, run directly in the **Terminal**:
-
-```
-cd /home/sagemaker-user/nat_for_regen_c_accumulation_sw
-nohup bash -c 'cat jobs_hist.txt | xargs -P72 -I{} bash -c "{}" 2>&1' > run_hist.log &
-tail -f data/outputs/hist/progress_hist.log
+}, mc.cores = n_par_workers)
 ```
 
 ---
