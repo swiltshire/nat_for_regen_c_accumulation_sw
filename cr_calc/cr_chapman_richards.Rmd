@@ -584,7 +584,7 @@ results <- parallel::mclapply(work_units, function(wu) {
       n_bands      = n_bands,
       log_file     = wu$log_file,
       app_cores    = 1L,
-      test_crop_n  = if (is.null(wu$crop_ext)) test_crop_n else 0L,
+      test_crop_n  = if (test_mode) test_crop_n else 0L,
       crop_ext     = wu$crop_ext,
       strip_suffix = wu$strip_suffix
     ),
