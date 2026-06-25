@@ -242,9 +242,18 @@ fit_cr_pixel <- function(pix_y, age_v, max_pot) {
                    A_err = 0, K_err = 0, B_err = 0,
                    convergence = 0)
 
-  if (all(is.na(pix_y)))              return(na_result)
-  if (any(is.na(pix_y)))             return(na_result)
-  if (is.na(max_pot) | max_pot <= 0) return(zero_result)
+  if (all(is.na(pix_y))) return(na_result)
+
+  # Filter out NA bands and their corresponding age entries
+  valid <- !is.na(pix_y)
+  pix_y <- pix_y[valid]
+  age_v <- age_v[valid]
+
+  # Need enough data: at least 5 distinct age steps represented
+  if (length(unique(age_v)) < 5) return(na_result)
+
+  max_pot <- max(pix_y)
+  if (max_pot <= 0) return(zero_result)
 
   # Helper: check whether nls converged (stopCode == 0 for "port" algorithm)
   converged <- function(fit) {
@@ -409,8 +418,16 @@ calc_cr_tile <- function(tile_id,
     }
     .fit_cr_pixel <- function(pix_y, age_v, max_pot) {
       na_r <- c(A=NA_real_,K=NA_real_,B=NA_real_,A_err=NA_real_,K_err=NA_real_,B_err=NA_real_,convergence=NA_real_)
-      if (all(is.na(pix_y)) | any(is.na(pix_y))) return(na_r)
-      if (is.na(max_pot) | max_pot <= 0) return(c(A=0,K=0,B=0,A_err=0,K_err=0,B_err=0,convergence=0))
+      if (all(is.na(pix_y))) return(na_r)
+
+      # Filter NA bands and corresponding age entries
+      valid <- !is.na(pix_y)
+      pix_y <- pix_y[valid]
+      age_v <- age_v[valid]
+      if (length(unique(age_v)) < 5) return(na_r)
+
+      max_pot <- max(pix_y)
+      if (max_pot <= 0) return(c(A=0,K=0,B=0,A_err=0,K_err=0,B_err=0,convergence=0))
       r1 <- .attempt_nls(pix_y, age_v, a_start = max_pot)
       if (is.null(r1)) return(c(na_r[1:6], convergence = 4))
       if (r1["A"] >= max_pot*0.9 & r1["A"] <= max_pot*1.1) return(c(r1, convergence=1))
