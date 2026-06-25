@@ -368,7 +368,8 @@ calc_cr_tile <- function(tile_id,
 
   # ── Optional: crop to strip extent or smoke-test window ──────────────────────
   if (!is.null(crop_ext)) {
-    agc_stack <- crop(agc_stack, crop_ext)
+    # crop_ext arrives as a numeric vector (serialization-safe); reconstruct
+    agc_stack <- crop(agc_stack, ext(crop_ext))
   } else if (test_crop_n > 0) {
     # Locate valid data: aggregate one layer coarsely to find a non-zero region,
     # then centre the crop window on the densest block.
@@ -540,8 +541,11 @@ if (test_mode) {
       row_end   <- min(s * rows_per_strip, nr)
       y_top     <- e[4] - (row_start - 1L) * ry
       y_bot     <- e[4] - row_end * ry
+      # Store extent as plain numeric vector (not SpatExtent) so it
+      # survives serialization to socket workers. Reconstructed in
+      # calc_cr_tile via terra::ext().
       list(tile_id      = tid,
-           crop_ext     = ext(e[1], e[2], y_bot, y_top),
+           crop_ext     = c(e[1], e[2], y_bot, y_top),
            strip_suffix = sprintf("_s%02d", s))
     })
   }) |> unlist(recursive = FALSE)
