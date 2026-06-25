@@ -102,8 +102,9 @@ scenario <- "hist"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Notebook-relative root of the project (two levels up from cr_calc/).
-# On SageMaker, set this explicitly to the mounted S3/EFS path, e.g.:
-#   project_root <- "/home/ec2-user/SageMaker/nat_for_regen_c_accumulation_sw"
+# On SageMaker Posit, this resolves automatically via rstudioapi. If running
+# via the wrapper script, rstudioapi may not be available — set explicitly:
+#   project_root <- "/home/sagemaker-user/nat_for_regen_c_accumulation_sw"
 project_root <- normalizePath(file.path(dirname(rstudioapi::getActiveDocumentContext()$path),
                                          ".."))
 
@@ -135,12 +136,9 @@ cat(sprintf("Cores available: %d | Strips/tile: %d | Work units: %d\n",
             n_cores, n_strips_per_tile, n_tiles * n_strips_per_tile))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
-# Maximum RAM (GB) terra may use per process when chunking raster I/O.
-# - "tile" mode:  budget = total_RAM / n_cores  (each worker reads one tile)
-# - "pixel" mode: budget = ~total_RAM * 0.75    (one tile at a time, all cores)
-# Total RAM budget for terra across all workers.
+# Total terra memory budget (GB) shared across all workers.
 # ml.m5.24xlarge = 384 GB: use ~250 GB, leaving headroom for R + OS.
-# Per-worker memmax is computed at runtime as floor(terra_mem_gb / n_workers).
+# Each mclapply worker sets its own memmax = floor(terra_mem_gb / n_workers).
 terra_mem_gb <- 250
 terraOptions(memmax = terra_mem_gb)
 
