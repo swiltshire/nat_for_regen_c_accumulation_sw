@@ -123,14 +123,13 @@ n_bands <- 20                    # realizations per age file (sd_001 – sd_020)
 age_vector <- rep(ages, each = n_bands)
 
 # ── Parallelisation ────────────────────────────────────────────────────────────
-# One mclapply worker per tile per scenario. Each worker processes a whole
-# tile via app() which reads lazily in chunks. Each worker reads its own set
-# of 20 input files — no I/O contention between workers.
+# One mclapply worker per work unit (= one tile). Each worker processes a
+# whole tile via app() which reads lazily in chunks. Each worker reads its
+# own set of 20 input files — no I/O contention between workers.
 n_tiles <- 18L
 n_cores <- max(1L, detectCores() - 1L)
 
-cat(sprintf("Cores: %d | Workers: %d (%d tiles × %d scenarios)\n",
-            n_cores, n_tiles * length(scenarios), n_tiles, length(scenarios)))
+cat(sprintf("Cores: %d | Tiles per scenario: %d\n", n_cores, n_tiles))
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 # Total terra memory budget (GB) shared across all workers.
@@ -535,9 +534,8 @@ for (scn in scenarios) {
 
 ## 6. CR Parameter Fitting
 
-Parallel via `mclapply` (fork-based on Linux). One worker per tile per
-scenario. With two scenarios, that is 36 workers — each reading its own
-files with zero I/O contention.
+Parallel via `mclapply` (fork-based on Linux). One worker per work unit,
+each reading its own files with zero I/O contention.
 
 On SageMaker, run via the wrapper script from the terminal — **not** as an
 RStudio background job (mclapply fork crashes inside RStudio Server).
