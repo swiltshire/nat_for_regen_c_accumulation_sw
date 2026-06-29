@@ -772,19 +772,24 @@ provides credentials automatically.
 if (!save_to_s3) {
   message("save_to_s3 is FALSE — skipping S3 sync.")
 } else {
+  if (!requireNamespace("aws.s3", quietly = TRUE)) install.packages("aws.s3")
+  library(aws.s3)
+
   for (scn in scenarios) {
     out_dir <- file.path(project_root, "data", "outputs", scn)
-    s3_dest <- sprintf("%s/%s/outputs", s3_output_base, scn)
-    cat(sprintf("Syncing %s: %s -> %s\n", scn, out_dir, s3_dest))
-    tryCatch({
-      ret <- system2("rclone", c("copy", out_dir, s3_dest, "--transfers", "20"),
-                      stdout = TRUE, stderr = TRUE)
-      cat(sprintf("Done: %s\n", scn))
-    }, error = function(e) {
-      cat(sprintf("S3 sync failed for %s: %s\n", scn, conditionMessage(e)))
-      cat("Run manually from terminal:\n")
-      cat(sprintf("  rclone copy %s %s --transfers 20 --progress\n", out_dir, s3_dest))
-    })
+    files   <- list.files(out_dir, pattern = "\\.tif$", recursive = TRUE, full.names = TRUE)
+    cat(sprintf("Syncing %s: %d files -> S3\n", scn, length(files)))
+
+    for (f in files) {
+      s3_key <- paste0("serge-wiltshire/nat_for_regen_c_accumulation_data/",
+                       scn, "/outputs/", sub(paste0(out_dir, "/"), "", f))
+      tryCatch({
+        put_object(file = f, bucket = "sagemaker-gst-stage.sharing", object = s3_key)
+      }, error = function(e) {
+        cat(sprintf("  Failed: %s — %s\n", basename(f), conditionMessage(e)))
+      })
+    }
+    cat(sprintf("Done: %s\n", scn))
   }
 }
 ```

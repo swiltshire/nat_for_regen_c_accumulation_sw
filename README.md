@@ -90,8 +90,8 @@ RStudio stays responsive.
 
 **Recommended instance:** `ml.r5.12xlarge` (48 vCPUs, 384 GB RAM, ~$3.60/hr).
 
-3. After completion, sync outputs to S3 (Section 9 of the notebook, or
-   manually via `rclone`).
+3. After completion, sync outputs to S3 (Section 9 of the notebook uses
+   the `aws.s3` R package — no CLI tools required).
 
 ### Data pipeline
 
