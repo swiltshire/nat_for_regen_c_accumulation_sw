@@ -17,15 +17,21 @@ regional tiles at ~1 km resolution for two climate scenarios (**hist**, **future
 
 ```
 cr_calc/
-  cr_chapman_richards.Rmd       # Main notebook
-  cr_chapman_richards_wrapper.R # Launches notebook as standalone Rscript process
+  cr_chapman_richards.Rmd          # CR parameter fitting notebook
+  cr_chapman_richards_wrapper.R    # Launches fitting as standalone Rscript
+  cr_interpolate_params.Rmd        # Interpolate A,B,K between hist and future
+  cr_interpolate_params_wrapper.R  # Launches interpolation as standalone Rscript
 setup/
-  fetch_input_data.Rmd          # Data pipeline: GCS -> S3 -> SageMaker (rclone)
+  fetch_input_data.Rmd             # Data pipeline: GCS -> S3 -> SageMaker (rclone)
 data/
   inputs/
-    future/                     # 360 tiles: age_005_*.tif ... age_100_*.tif (20 bands each)
-    hist/                       # Same structure, historical climate scenario
-  outputs/                      # Written by the notebook (gitignored)
+    future/                        # 360 tiles: age_005_*.tif ... age_100_*.tif (20 bands each)
+    hist/                          # Same structure, historical climate scenario
+  outputs/                         # Written by the notebooks (gitignored)
+    hist/{A,B,K,...}/              # Single-band param tiles from CR fitting
+    future/{A,B,K,...}/            # Single-band param tiles from CR fitting
+    interpolated/{A,B,K}/          # 10-band interpolated tiles (yr_000 ... yr_090)
+    interpolated/mosaic/           # Global mosaics: A_global.tif, B_global.tif, K_global.tif
 ```
 
 ## Inputs
@@ -92,6 +98,31 @@ RStudio stays responsive.
 
 3. After completion, sync outputs to S3 (Section 9 of the notebook uses
    the `aws.s3` R package — no CLI tools required).
+
+### Interpolation (after CR fitting)
+
+After CR fitting is complete for both scenarios, interpolate A, B, K between
+hist (year 0) and future (year 90) at decadal intervals:
+
+1. Set config in `cr_calc/cr_interpolate_params.Rmd`:
+
+```r
+test_mode    <- FALSE
+terra_mem_gb <- 250
+```
+
+2. Launch from terminal:
+
+```bash
+cd /home/sagemaker-user/nat_for_regen_c_accumulation_sw
+nohup Rscript cr_calc/cr_interpolate_params_wrapper.R > interp_wrapper.log 2>&1 &
+tail -f data/outputs/interpolated/progress_interpolate.log
+```
+
+Outputs: 10-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/` (per-tile)
+and `data/outputs/interpolated/mosaic/{A,B,K}_global.tif` (mosaicked global),
+with bands `yr_000` through `yr_090`. Completes in seconds per tile (pure
+raster algebra); mosaic step runs after all tiles finish.
 
 ### Data pipeline
 

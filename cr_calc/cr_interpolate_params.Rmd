@@ -1,0 +1,399 @@
+---
+title: "Interpolate CR Parameters Across Future Years"
+subtitle: "Linear interpolation of A, B, K between hist (year 0) and future (year 90)"
+author: "Serge Wiltshire"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+rm(list = ls())
+```
+
+---
+
+## Overview
+
+This notebook linearly interpolates the Chapman-Richards parameters **A**, **B**, and
+**K** between historical (year 0) and future (year 90) climate scenarios, producing
+10-band GeoTIFFs at decadal intervals.
+
+For each parameter $P \in \{A, B, K\}$ and each pixel:
+
+$$
+P(\text{year}) = P_{\text{hist}} + (P_{\text{future}} - P_{\text{hist}}) \times \frac{\text{year}}{90}
+$$
+
+where year $\in \{0, 10, 20, \ldots, 90\}$.
+
+**Inputs:** single-band GeoTIFFs from `data/outputs/hist/{A,B,K}/` and
+`data/outputs/future/{A,B,K}/` produced by `cr_chapman_richards.Rmd`.
+
+**Outputs:** 10-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/`, one per tile,
+with bands named `yr_000`, `yr_010`, …, `yr_090`.
+
+> **Computational note:** This is pure raster algebra (no NLS fitting) so each tile
+> completes in seconds. Still runs via the wrapper script on SageMaker for mclapply
+> fork safety.
+
+---
+
+## 1. Package Setup
+
+```{r packages}
+required_packages <- c("terra", "parallel")
+
+new_pkgs <- required_packages[
+  !(required_packages %in% installed.packages()[, "Package"])
+]
+if (length(new_pkgs) > 0) install.packages(new_pkgs, dep = TRUE)
+
+invisible(lapply(required_packages, library, character.only = TRUE))
+```
+
+---
+
+## 2. Configuration
+
+```{r config}
+# ── Smoke test toggle ─────────────────────────────────────────────────────────
+# TRUE  → run on one tile cropped to test_crop_n × test_crop_n pixels.
+# FALSE → full production run over all tiles.
+test_mode   <- FALSE
+test_crop_n <- 150L
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+  project_root <- normalizePath(file.path(
+    dirname(rstudioapi::getActiveDocumentContext()$path), ".."))
+} else {
+  project_root <- getwd()
+}
+
+hist_dir   <- file.path(project_root, "data", "outputs", "hist")
+future_dir <- file.path(project_root, "data", "outputs", "future")
+output_dir <- file.path(project_root, "data", "outputs", "interpolated")
+
+# ── Interpolation grid ────────────────────────────────────────────────────────
+years      <- seq(0, 90, by = 10)   # 10 decadal steps
+weights    <- years / 90            # 0 = pure hist, 1 = pure future
+band_names <- sprintf("yr_%03d", years)
+
+# ── Parameters to interpolate ────────────────────────────────────────────────
+params <- c("A", "B", "K")
+
+# ── Parallelisation ──────────────────────────────────────────────────────────
+n_cores <- max(1L, detectCores() - 1L)
+
+# ── Memory ────────────────────────────────────────────────────────────────────
+# ml.r5.12xlarge = 384 GB; allocate ~250 GB to terra.
+terra_mem_gb <- 250
+terraOptions(memmax = terra_mem_gb)
+
+# ── S3 output ─────────────────────────────────────────────────────────────────
+save_to_s3 <- TRUE
+s3_output_base <- "s3://sagemaker-gst-stage.sharing/serge-wiltshire/nat_for_regen_c_accumulation_data"
+
+cat(sprintf("Cores: %d\n", n_cores))
+cat(sprintf("Years: %s\n", paste(years, collapse = ", ")))
+```
+
+---
+
+## 3. Core Function
+
+```{r fn_interpolate_tile}
+#' Interpolate A, B, K for a single tile across decadal future years.
+#'
+#' Reads single-band hist and future parameter tiles, linearly interpolates
+#' across the year grid, and writes one 10-band GeoTIFF per parameter.
+#'
+#' @param tile_id    Character tile identifier.
+#' @param hist_dir   Path to hist output directory (contains A/, B/, K/).
+#' @param future_dir Path to future output directory.
+#' @param output_dir Path to interpolated output directory.
+#' @param params     Character vector of parameter names (default c("A","B","K")).
+#' @param weights    Numeric vector of interpolation weights (0 = hist, 1 = future).
+#' @param band_names Character vector of band names for the output raster.
+#' @param log_file   Path to progress log (NULL to skip logging).
+#' @param test_crop_n Integer; if > 0, crop to a small window for testing.
+#' @return Invisibly returns tile_id on success.
+interpolate_tile <- function(tile_id,
+                             hist_dir,
+                             future_dir,
+                             output_dir,
+                             params     = c("A", "B", "K"),
+                             weights    = seq(0, 1, length.out = 10),
+                             band_names = sprintf("yr_%03d", seq(0, 90, by = 10)),
+                             log_file   = NULL,
+                             test_crop_n = 0L) {
+
+  pid <- Sys.getpid()
+
+  log_msg <- function(step, detail = "") {
+    msg <- sprintf("[%s | pid=%d] %s %s — %s\n",
+                   tile_id, pid, step, detail, format(Sys.time(), "%H:%M:%S"))
+    if (!is.null(log_file)) cat(msg, file = log_file, append = TRUE)
+  }
+
+  log_msg("START", sprintf("interpolating %d params × %d years",
+                            length(params), length(weights)))
+
+  for (param in params) {
+    hist_path   <- file.path(hist_dir,   param, sprintf("%s_%s.tif", param, tile_id))
+    future_path <- file.path(future_dir, param, sprintf("%s_%s.tif", param, tile_id))
+
+    if (!file.exists(hist_path) || !file.exists(future_path)) {
+      log_msg("SKIP", sprintf("%s — missing input", param))
+      next
+    }
+
+    r_hist   <- rast(hist_path)
+    r_future <- rast(future_path)
+
+    # Optional test crop
+    if (test_crop_n > 0) {
+      e  <- ext(r_hist)
+      rx <- res(r_hist)[1]; ry <- res(r_hist)[2]
+      crop_ext <- ext(e[1], e[1] + test_crop_n * rx,
+                      e[4] - test_crop_n * ry, e[4])
+      r_hist   <- crop(r_hist,   crop_ext)
+      r_future <- crop(r_future, crop_ext)
+    }
+
+    # Build 10-band stack via raster algebra
+    r_diff  <- r_future - r_hist
+    bands   <- lapply(weights, function(w) r_hist + r_diff * w)
+    r_stack <- rast(bands)
+    names(r_stack) <- band_names
+
+    # Write output
+    param_out_dir <- file.path(output_dir, param)
+    dir.create(param_out_dir, recursive = TRUE, showWarnings = FALSE)
+    out_path <- file.path(param_out_dir, sprintf("%s_%s.tif", param, tile_id))
+    writeRaster(r_stack, out_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+
+    log_msg("WROTE", sprintf("%s — %d bands", param, nlyr(r_stack)))
+  }
+
+  log_msg("DONE", "all params written")
+  invisible(tile_id)
+}
+```
+
+---
+
+## 4. File Discovery
+
+```{r work_units}
+if (test_mode) {
+
+  # ── Smoke test: one tile ────────────────────────────────────────────────────
+  tile_files   <- list.files(file.path(hist_dir, "A"), pattern = "\\.tif$")
+  all_tile_ids <- sub("^A_(.+)\\.tif$", "\\1", tile_files)
+
+  work_units <- list(list(tile_id = all_tile_ids[1]))
+  cat(sprintf("[TEST MODE] 1 tile, %d×%d px crop\n", test_crop_n, test_crop_n))
+
+} else {
+
+  # ── Production: one work unit per tile ──────────────────────────────────────
+  tile_files   <- list.files(file.path(hist_dir, "A"), pattern = "\\.tif$")
+  all_tile_ids <- sub("^A_(.+)\\.tif$", "\\1", tile_files)
+
+  # Check that future tiles match
+  future_files   <- list.files(file.path(future_dir, "A"), pattern = "\\.tif$")
+  future_tile_ids <- sub("^A_(.+)\\.tif$", "\\1", future_files)
+  common_tiles    <- intersect(all_tile_ids, future_tile_ids)
+
+  if (length(common_tiles) < length(all_tile_ids)) {
+    cat(sprintf("WARNING: %d hist tiles, %d future tiles, %d in common\n",
+                length(all_tile_ids), length(future_tile_ids), length(common_tiles)))
+  }
+
+  # Skip completed tiles (check A/ subdirectory)
+  completed_dir   <- file.path(output_dir, "A")
+  completed_files <- if (dir.exists(completed_dir))
+    list.files(completed_dir, pattern = "\\.tif$") else character(0)
+
+  work_units <- lapply(common_tiles, function(tid) {
+    if (sprintf("A_%s.tif", tid) %in% completed_files) return(NULL)
+    list(tile_id = tid)
+  })
+  work_units <- Filter(Negate(is.null), work_units)
+
+  cat(sprintf("Tiles: %d total, %d already complete, %d to process\n",
+              length(common_tiles),
+              length(common_tiles) - length(work_units),
+              length(work_units)))
+}
+```
+
+---
+
+## 5. Output Directory Setup
+
+```{r output_dirs}
+invisible(lapply(file.path(output_dir, params),
+                 dir.create, recursive = TRUE, showWarnings = FALSE))
+
+log_file <- file.path(output_dir, "progress_interpolate.log")
+file.create(log_file, showWarnings = FALSE)
+cat(sprintf("Run started: %s\n", format(Sys.time())),
+    file = log_file, append = TRUE)
+
+cat(sprintf("Output: %s\n", output_dir))
+cat(sprintf("Log:    %s\n", log_file))
+```
+
+---
+
+## 6. Interpolation
+
+```{r interpolate_parallel}
+n_workers       <- min(n_cores, length(work_units))
+per_worker_mem  <- max(1L, floor(terra_mem_gb / max(n_workers, 1L)))
+
+cat(sprintf("=== Interpolation ===\n"))
+cat(sprintf("  Work units:   %d\n", length(work_units)))
+cat(sprintf("  Workers:      %d (of %d cores)\n", n_workers, parallel::detectCores()))
+cat(sprintf("  Per-worker terra memmax: %d GB\n", per_worker_mem))
+cat(sprintf("  Started: %s\n", format(Sys.time())))
+
+if (length(work_units) == 0) {
+  cat("Nothing to do — all tiles already complete.\n")
+} else {
+  results <- parallel::mclapply(work_units, function(wu) {
+    library(terra)
+    terraOptions(memmax = per_worker_mem)
+    tryCatch(
+      interpolate_tile(
+        tile_id     = wu$tile_id,
+        hist_dir    = hist_dir,
+        future_dir  = future_dir,
+        output_dir  = output_dir,
+        params      = params,
+        weights     = weights,
+        band_names  = band_names,
+        log_file    = log_file,
+        test_crop_n = if (test_mode) test_crop_n else 0L
+      ),
+      error = function(e) {
+        msg <- sprintf("[%s | pid=%d] FATAL: %s\n",
+                       wu$tile_id, Sys.getpid(), conditionMessage(e))
+        cat(msg, file = log_file, append = TRUE)
+        paste("ERROR:", conditionMessage(e))
+      }
+    )
+  }, mc.cores = n_workers)
+
+  # ── Report ──────────────────────────────────────────────────────────────────
+  is_err <- vapply(results, function(x) {
+    is.character(x) && startsWith(x, "ERROR:")
+  }, logical(1))
+  cat(sprintf("\n=== Done | %d tiles | %d errors | %s ===\n",
+              length(results), sum(is_err), format(Sys.time())))
+
+  if (any(is_err)) {
+    cat("\nErrors:\n")
+    invisible(lapply(results[is_err], function(e) cat("  ", e, "\n")))
+  }
+}
+```
+
+---
+
+## 7. Run Summary
+
+```{r summary}
+for (param in params) {
+  n_files <- length(list.files(file.path(output_dir, param), pattern = "\\.tif$"))
+  cat(sprintf("  %s: %d tiles\n", param, n_files))
+}
+
+if (file.exists(log_file)) {
+  cat("\nLast 10 log lines:\n")
+  cat(tail(readLines(log_file), 10), sep = "\n")
+}
+```
+
+---
+
+## 8. Mosaic Tiles into Global Rasters
+
+Merge the 18 per-tile 10-band GeoTIFFs into one global raster per parameter.
+Uses `terra::vrt()` to build a GDAL Virtual Raster (lightweight XML pointer)
+rather than loading all tiles into memory. `writeRaster()` then streams from
+the VRT to disk in chunks, keeping RAM usage low even for large global mosaics.
+
+```{r mosaic}
+if (test_mode) {
+  message("Mosaic skipped in test mode.")
+} else {
+  mosaic_dir <- file.path(output_dir, "mosaic")
+  dir.create(mosaic_dir, recursive = TRUE, showWarnings = FALSE)
+
+  for (param in params) {
+    tile_files <- list.files(file.path(output_dir, param),
+                             pattern = "\\.tif$", full.names = TRUE)
+    if (length(tile_files) == 0) {
+      cat(sprintf("  %s: no tiles found, skipping\n", param))
+      next
+    }
+
+    cat(sprintf("  %s: building VRT from %d tiles ... ", param, length(tile_files)))
+    t0 <- Sys.time()
+
+    vrt_path <- file.path(mosaic_dir, sprintf("%s_global.vrt", param))
+    v <- vrt(tile_files, filename = vrt_path, overwrite = TRUE)
+    names(v) <- band_names
+
+    out_path <- file.path(mosaic_dir, sprintf("%s_global.tif", param))
+    writeRaster(v, out_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+
+    elapsed <- round(difftime(Sys.time(), t0, units = "secs"), 1)
+    cat(sprintf("done (%s sec) -> %s\n", elapsed, basename(out_path)))
+  }
+
+  cat(sprintf("\nMosaic outputs: %s\n", mosaic_dir))
+}
+```
+
+---
+
+## 9. Sync Outputs to S3
+
+```{r sync-to-s3}
+if (!save_to_s3) {
+  message("save_to_s3 is FALSE — skipping S3 sync.")
+} else {
+  if (!requireNamespace("aws.s3", quietly = TRUE)) install.packages("aws.s3")
+  library(aws.s3)
+
+  files <- list.files(output_dir, pattern = "\\.tif$",
+                      recursive = TRUE, full.names = TRUE)
+  cat(sprintf("Syncing interpolated: %d files -> S3\n", length(files)))
+
+  for (f in files) {
+    s3_key <- paste0("serge-wiltshire/nat_for_regen_c_accumulation_data/",
+                     "interpolated/", sub(paste0(output_dir, "/"), "", f))
+    tryCatch({
+      put_object(file = f, bucket = "sagemaker-gst-stage.sharing", object = s3_key)
+    }, error = function(e) {
+      cat(sprintf("  Failed: %s — %s\n", basename(f), conditionMessage(e)))
+    })
+  }
+  cat("Done.\n")
+}
+```
+
+---
+
+*Interpolation completes in seconds per tile — much faster than the CR fitting step.*
