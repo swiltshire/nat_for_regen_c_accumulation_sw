@@ -218,13 +218,16 @@ if (test_mode) {
                 length(all_tile_ids), length(future_tile_ids), length(common_tiles)))
   }
 
-  # Skip completed tiles (check A/ subdirectory)
-  completed_dir   <- file.path(output_dir, "A")
-  completed_files <- if (dir.exists(completed_dir))
-    list.files(completed_dir, pattern = "\\.tif$") else character(0)
 
+  # Skip completed tiles — only skip if ALL params (A, B, K) exist and are valid
   work_units <- lapply(common_tiles, function(tid) {
-    if (sprintf("A_%s.tif", tid) %in% completed_files) return(NULL)
+    all_done <- all(vapply(params, function(p) {
+      f <- file.path(output_dir, p, sprintf("%s_%s.tif", p, tid))
+      if (!file.exists(f)) return(FALSE)
+      tryCatch({ r <- rast(f); nlyr(r) == length(band_names) },
+               error = function(e) FALSE, warning = function(w) FALSE)
+    }, logical(1)))
+    if (all_done) return(NULL)
     list(tile_id = tid)
   })
   work_units <- Filter(Negate(is.null), work_units)
@@ -348,6 +351,18 @@ if (test_mode) {
       next
     }
 
+    # Validate tiles — drop any that GDAL can't read
+    valid <- vapply(tile_files, function(tf) {
+      tryCatch({ rast(tf); TRUE },
+               error = function(e) FALSE, warning = function(w) FALSE)
+    }, logical(1))
+    if (any(!valid)) {
+      cat(sprintf("  %s: dropping %d corrupt tile(s): %s\n",
+                  param, sum(!valid),
+                  paste(basename(tile_files[!valid]), collapse = ", ")))
+      tile_files <- tile_files[valid]
+    }
+
     cat(sprintf("  %s: building VRT from %d tiles ... ", param, length(tile_files)))
     t0 <- Sys.time()
 
@@ -384,8 +399,11 @@ if (!save_to_s3) {
   for (f in files) {
     s3_key <- paste0("serge-wiltshire/nat_for_regen_c_accumulation_data/",
                      "interpolated/", sub(paste0(output_dir, "/"), "", f))
+    # Use multipart upload for files > 2 GB to avoid curl integer overflow
+    use_multipart <- file.size(f) > 2e9
     tryCatch({
-      put_object(file = f, bucket = "sagemaker-gst-stage.sharing", object = s3_key)
+      put_object(file = f, bucket = "sagemaker-gst-stage.sharing",
+                 object = s3_key, multipart = use_multipart)
     }, error = function(e) {
       cat(sprintf("  Failed: %s — %s\n", basename(f), conditionMessage(e)))
     })
