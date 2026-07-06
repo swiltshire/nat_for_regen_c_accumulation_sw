@@ -17,15 +17,18 @@ world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 param_config <- list(
   A = list(
     file  = file.path(mosaic_dir, "A_global.tif"),
-    label = expression(Delta * italic(A) ~ "(Mg C ha"^{-1} * ")")
+    title = "Change in A, present to 2090",
+    label = expression("Mg C ha"^{-1})
   ),
   B = list(
     file  = file.path(mosaic_dir, "B_global.tif"),
-    label = expression(Delta * italic(B) ~ "(shape)")
+    title = "Change in B, present to 2090",
+    label = "unitless"
   ),
   K = list(
     file  = file.path(mosaic_dir, "K_global.tif"),
-    label = expression(Delta * italic(K) ~ "(yr"^{-1} * ")")
+    title = "Change in K, present to 2090",
+    label = expression("yr"^{-1})
   )
 )
 
@@ -38,7 +41,7 @@ base_theme <- theme_minimal(base_size = 10) +
     legend.position   = "right",
     legend.title      = element_text(size = 8),
     legend.text       = element_text(size = 7),
-    legend.key.height = unit(2, "cm"),
+    legend.key.height = unit(1.2, "cm"),
     legend.key.width  = unit(0.3, "cm"),
     plot.title        = element_text(size = 11, face = "bold", hjust = 0),
     plot.margin       = margin(2, 4, 2, 4)
@@ -59,6 +62,7 @@ panels <- imap(param_config, function(cfg, param_name) {
     geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
     scale_fill_distiller(
       name     = cfg$label,
+      breaks   = scales::breaks_pretty(n = 5),
       type     = "div",
       palette  = "RdBu",
       limits   = c(-abs_max, abs_max),
@@ -67,7 +71,7 @@ panels <- imap(param_config, function(cfg, param_name) {
       guide    = guide_colorbar(title.position = "top")
     ) +
     coord_sf(expand = FALSE, ylim = c(-60, 80)) +
-    labs(title = paste0(param_name, ": Year 90 \u2013 Year 0")) +
+    labs(title = cfg$title) +
     base_theme
 })
 
