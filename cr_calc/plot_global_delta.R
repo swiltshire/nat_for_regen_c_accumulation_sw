@@ -47,10 +47,18 @@ base_theme <- theme_minimal(base_size = 10) +
     plot.margin       = margin(2, 4, 2, 4)
   )
 
+delta_dir <- "data/outputs/interpolated/delta"
+dir.create(delta_dir, recursive = TRUE, showWarnings = FALSE)
+
 panels <- imap(param_config, function(cfg, param_name) {
   cat(sprintf("Computing delta for %s...\n", param_name))
   r <- rast(cfg$file)
   delta <- r[[10]] - r[[1]]
+
+  # Save delta GeoTIFF
+  delta_path <- file.path(delta_dir, paste0(param_name, "_delta.tif"))
+  writeRaster(delta, delta_path, overwrite = TRUE)
+  cat(sprintf("  Saved raster: %s\n", delta_path))
 
   qlims <- global(delta, fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
   qlims <- as.numeric(qlims)
