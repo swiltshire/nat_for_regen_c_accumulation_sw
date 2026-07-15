@@ -21,6 +21,8 @@ cr_calc/
   cr_chapman_richards_wrapper.R    # Launches fitting as standalone Rscript
   cr_interpolate_params.Rmd        # Interpolate A,B,K between hist and future
   cr_interpolate_params_wrapper.R  # Launches interpolation as standalone Rscript
+  plot_global_panels.R             # 3-panel maps of A, K, B at 2005/2050/2090
+  plot_global_delta.R              # Delta maps (2090 − 2005) for A, K, B
 setup/
   fetch_input_data.Rmd             # Data pipeline: GCS -> S3 -> SageMaker (rclone)
 data/
@@ -30,7 +32,7 @@ data/
   outputs/                         # Written by the notebooks (gitignored)
     hist/{A,B,K,...}/              # Single-band param tiles from CR fitting
     future/{A,B,K,...}/            # Single-band param tiles from CR fitting
-    interpolated/{A,B,K}/          # 10-band interpolated tiles (yr_000 ... yr_090)
+    interpolated/{A,B,K}/          # 18-band interpolated tiles (yr_2005 ... yr_2090)
     interpolated/mosaic/           # Global mosaics: A_global.tif, B_global.tif, K_global.tif
 ```
 
@@ -102,7 +104,7 @@ RStudio stays responsive.
 ### Interpolation (after CR fitting)
 
 After CR fitting is complete for both scenarios, interpolate A, B, K between
-hist (year 0) and future (year 90) at decadal intervals:
+hist (2005) and future (2090) at 5-year intervals:
 
 1. Set config in `cr_calc/cr_interpolate_params.Rmd`:
 
@@ -119,10 +121,10 @@ nohup Rscript cr_calc/cr_interpolate_params_wrapper.R > interp_wrapper.log 2>&1 
 tail -f data/outputs/interpolated/progress_interpolate.log
 ```
 
-Outputs: 10-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/` (per-tile)
+Outputs: 18-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/` (per-tile)
 and `data/outputs/interpolated/mosaic/{A,B,K}_global.tif` (mosaicked global),
-with bands `yr_000` through `yr_090`. Completes in seconds per tile (pure
-raster algebra); mosaic step runs after all tiles finish.
+with bands `yr_2005` through `yr_2090` at 5-year intervals. Completes in
+seconds per tile (pure raster algebra); mosaic step runs after all tiles finish.
 
 ### Data pipeline
 
@@ -133,7 +135,8 @@ See `setup/fetch_input_data.Rmd` for transferring input data from GCS to S3
 ## Dependencies
 
 ```r
-install.packages(c("terra", "tidyverse", "minpack.lm"))
+install.packages(c("terra", "tidyverse", "minpack.lm",
+                   "tidyterra", "patchwork", "sf", "rnaturalearth"))
 ```
 
 `parallel` is included with base R.

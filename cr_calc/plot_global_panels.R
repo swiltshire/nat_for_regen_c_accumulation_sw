@@ -1,6 +1,6 @@
 # plot_global_panels.R
 # Publication-quality 3-panel figures for A, B, K global mosaics.
-# Each figure shows yr_000, yr_050, yr_090. Run from project root.
+# Each figure shows yr_2005, yr_2050, yr_2090. Run from project root.
 
 library(terra)
 library(tidyterra)
@@ -14,35 +14,39 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
-# Band indices: yr_000 = 1, yr_050 = 6, yr_090 = 10
-target_bands <- c(yr_000 = 1, yr_050 = 6, yr_090 = 10)
-band_labels  <- c(yr_000 = "Year 0", yr_050 = "Year 50", yr_090 = "Year 90")
+# Band indices: yr_2005 = 1, yr_2050 = 10, yr_2090 = 18
+target_bands <- c(yr_2005 = 1, yr_2050 = 10, yr_2090 = 18)
+band_labels  <- c(yr_2005 = "2005", yr_2050 = "2050", yr_2090 = "2090")
 
+# Ordered A -> K -> B for consistency with delta plots
 param_config <- list(
   A = list(
-    file      = file.path(mosaic_dir, "A_global.tif"),
-    label     = expression(italic(A) ~ "(Mg C ha"^{-1} * ")"),
-    palette   = "mako",
-    direction = -1
-  ),
-  B = list(
-    file      = file.path(mosaic_dir, "B_global.tif"),
-    label     = expression(italic(B) ~ "(shape)"),
-    palette   = "rocket",
-    direction = -1
+    file  = file.path(mosaic_dir, "A_global.tif"),
+    title = "Maximum Potential Carbon Density (A)",
+    label = expression("A (Mg C ha"^{-1} * ")"),
+    low   = "#e8f5e9",
+    high  = "#1b5e20"
   ),
   K = list(
-    file      = file.path(mosaic_dir, "K_global.tif"),
-    label     = expression(italic(K) ~ "(yr"^{-1} * ")"),
-    palette   = "viridis",
-    direction = 1
+    file  = file.path(mosaic_dir, "K_global.tif"),
+    title = "Growth Rate Coefficient (K)",
+    label = "K",
+    low   = "#fff3e0",
+    high  = "#e65100"
+  ),
+  B = list(
+    file  = file.path(mosaic_dir, "B_global.tif"),
+    title = "Initial Carbon Density (B)",
+    label = "B",
+    low   = "#0d47a1",
+    high  = "#f5f0d0"
   )
 )
 
 base_theme <- theme_minimal(base_size = 10) +
   theme(
     panel.grid        = element_blank(),
-    panel.background  = element_rect(fill = "grey95", colour = NA),
+    panel.background  = element_rect(fill = "white", colour = NA),
     axis.title        = element_blank(),
     axis.text         = element_text(size = 7, colour = "grey40"),
     legend.position   = "bottom",
@@ -71,14 +75,14 @@ for (param_name in names(param_config)) {
     ggplot() +
       geom_spatraster(data = lyr, maxcell = 5e6) +
       geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
-      scale_fill_viridis_c(
-        name      = cfg$label,
-        option    = cfg$palette,
-        direction = cfg$direction,
-        limits    = qlims,
-        oob       = scales::squish,
-        na.value  = "transparent",
-        guide     = guide_colorbar(title.position = "top", title.hjust = 0.5)
+      scale_fill_gradient(
+        name     = cfg$label,
+        low      = cfg$low,
+        high     = cfg$high,
+        limits   = qlims,
+        oob      = scales::squish,
+        na.value = "white",
+        guide    = guide_colorbar(title.position = "top", title.hjust = 0.5)
       ) +
       coord_sf(expand = FALSE, ylim = c(-60, 80)) +
       labs(title = band_labels[band_name]) +
@@ -87,6 +91,7 @@ for (param_name in names(param_config)) {
 
   # Stack vertically with a shared legend
   p <- wrap_plots(panels, ncol = 1) +
+    plot_annotation(title = cfg$title) +
     plot_layout(guides = "collect") &
     theme(legend.position = "bottom")
 

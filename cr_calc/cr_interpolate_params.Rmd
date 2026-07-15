@@ -1,6 +1,6 @@
 ---
 title: "Interpolate CR Parameters Across Future Years"
-subtitle: "Linear interpolation of A, B, K between hist (year 0) and future (year 90)"
+subtitle: "Linear interpolation of A, B, K between hist (2005) and future (2090)"
 author: "Serge Wiltshire"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output:
@@ -22,22 +22,22 @@ rm(list = ls())
 ## Overview
 
 This notebook linearly interpolates the Chapman-Richards parameters **A**, **B**, and
-**K** between historical (year 0) and future (year 90) climate scenarios, producing
-10-band GeoTIFFs at decadal intervals.
+**K** between historical (2005) and future (2090) climate scenarios, producing
+GeoTIFFs at 5-year intervals.
 
 For each parameter $P \in \{A, B, K\}$ and each pixel:
 
 $$
-P(\text{year}) = P_{\text{hist}} + (P_{\text{future}} - P_{\text{hist}}) \times \frac{\text{year}}{90}
+P(\text{year}) = P_{\text{hist}} + (P_{\text{future}} - P_{\text{hist}}) \times \frac{\text{year} - 2005}{85}
 $$
 
-where year $\in \{0, 10, 20, \ldots, 90\}$.
+where year $\in \{2005, 2010, 2015, \ldots, 2090\}$.
 
 **Inputs:** single-band GeoTIFFs from `data/outputs/hist/{A,B,K}/` and
 `data/outputs/future/{A,B,K}/` produced by `cr_chapman_richards.Rmd`.
 
-**Outputs:** 10-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/`, one per tile,
-with bands named `yr_000`, `yr_010`, …, `yr_090`.
+**Outputs:** 18-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/`, one per tile,
+with bands named `yr_2005`, `yr_2010`, `yr_2015`, …, `yr_2090`.
 
 > **Computational note:** This is pure raster algebra (no NLS fitting) so each tile
 > completes in seconds. Still runs via the wrapper script on SageMaker for mclapply
@@ -82,9 +82,10 @@ future_dir <- file.path(project_root, "data", "outputs", "future")
 output_dir <- file.path(project_root, "data", "outputs", "interpolated")
 
 # ── Interpolation grid ────────────────────────────────────────────────────────
-years      <- seq(0, 90, by = 10)   # 10 decadal steps
-weights    <- years / 90            # 0 = pure hist, 1 = pure future
-band_names <- sprintf("yr_%03d", years)
+# 2005–2090 = 85 years; 5-year intervals divide evenly (18 steps)
+years      <- seq(2005, 2090, by = 5)
+weights    <- (years - 2005) / 85        # 0 = pure hist (2005), 1 = pure future (2090)
+band_names <- sprintf("yr_%d", years)
 
 # ── Parameters to interpolate ────────────────────────────────────────────────
 params <- c("A", "B", "K")
@@ -130,8 +131,8 @@ interpolate_tile <- function(tile_id,
                              future_dir,
                              output_dir,
                              params     = c("A", "B", "K"),
-                             weights    = seq(0, 1, length.out = 10),
-                             band_names = sprintf("yr_%03d", seq(0, 90, by = 10)),
+                             weights    = (seq(2005, 2090, by = 5) - 2005) / 85,
+                             band_names = sprintf("yr_%d", seq(2005, 2090, by = 5)),
                              log_file   = NULL,
                              test_crop_n = 0L) {
 
