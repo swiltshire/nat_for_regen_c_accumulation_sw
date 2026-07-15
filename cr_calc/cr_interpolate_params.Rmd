@@ -332,37 +332,51 @@ if (file.exists(log_file)) {
 
 ## 8. Mosaic Tiles into Global Rasters
 
-Merge the 18 per-tile 10-band GeoTIFFs into one global raster per parameter.
-Uses `terra::vrt()` to build a GDAL Virtual Raster (lightweight XML pointer)
-rather than loading all tiles into memory. `writeRaster()` then streams from
-the VRT to disk in chunks, keeping RAM usage low even for large global mosaics.
+Merge the per-tile 18-band GeoTIFFs into one global raster per parameter.
+First validates that all expected tiles are present and have the correct band
+count — aborts with an error if any are missing or corrupt, so the mosaic is
+never built from incomplete data. Uses `terra::vrt()` to build a GDAL Virtual
+Raster (lightweight XML pointer) rather than loading all tiles into memory.
+`writeRaster()` then streams from the VRT to disk in chunks, keeping RAM usage
+low even for large global mosaics.
 
 ```{r mosaic}
 if (test_mode) {
   message("Mosaic skipped in test mode.")
 } else {
+
+  # ── Gate: only mosaic if all tiles completed for all params ─────────────────
+  expected_tiles <- length(common_tiles)
+  tile_counts <- vapply(params, function(p) {
+    files <- list.files(file.path(output_dir, p), pattern = "\\.tif$",
+                        full.names = TRUE)
+    # Count only valid tiles with the correct number of bands
+    sum(vapply(files, function(f) {
+      tryCatch({ nlyr(rast(f)) == length(band_names) },
+               error = function(e) FALSE, warning = function(w) FALSE)
+    }, logical(1)))
+  }, integer(1))
+
+  cat("Tile completeness check:\n")
+  for (p in params) {
+    cat(sprintf("  %s: %d / %d\n", p, tile_counts[p], expected_tiles))
+  }
+
+  if (any(tile_counts < expected_tiles)) {
+    stop(sprintf(
+      "MOSAIC ABORTED: incomplete tiles detected (%s). Re-run interpolation to fill gaps.",
+      paste(sprintf("%s=%d/%d", params, tile_counts, expected_tiles), collapse = ", ")
+    ))
+  }
+
+  cat("All tiles complete — proceeding to mosaic.\n\n")
+
   mosaic_dir <- file.path(output_dir, "mosaic")
   dir.create(mosaic_dir, recursive = TRUE, showWarnings = FALSE)
 
   for (param in params) {
     tile_files <- list.files(file.path(output_dir, param),
                              pattern = "\\.tif$", full.names = TRUE)
-    if (length(tile_files) == 0) {
-      cat(sprintf("  %s: no tiles found, skipping\n", param))
-      next
-    }
-
-    # Validate tiles — drop any that GDAL can't read
-    valid <- vapply(tile_files, function(tf) {
-      tryCatch({ rast(tf); TRUE },
-               error = function(e) FALSE, warning = function(w) FALSE)
-    }, logical(1))
-    if (any(!valid)) {
-      cat(sprintf("  %s: dropping %d corrupt tile(s): %s\n",
-                  param, sum(!valid),
-                  paste(basename(tile_files[!valid]), collapse = ", ")))
-      tile_files <- tile_files[valid]
-    }
 
     cat(sprintf("  %s: building VRT from %d tiles ... ", param, length(tile_files)))
     t0 <- Sys.time()
