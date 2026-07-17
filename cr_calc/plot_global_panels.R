@@ -100,4 +100,23 @@ for (param_name in names(param_config)) {
   cat(sprintf("  Saved: %s\n", out_path))
 }
 
+# ── Copy saved figures to S3 ──────────────────────────────────────────────────
+library(aws.s3)
+
+s3_bucket <- "sagemaker-gst-stage.sharing"
+s3_prefix <- "serge-wiltshire/nat_for_regen_c_accumulation_data/figures/"
+
+fig_files <- list.files(out_dir, pattern = "\\.png$", full.names = TRUE)
+cat(sprintf("\nUploading %d figures to S3...\n", length(fig_files)))
+
+for (f in fig_files) {
+  s3_key <- paste0(s3_prefix, basename(f))
+  tryCatch({
+    put_object(file = f, bucket = s3_bucket, object = s3_key)
+    cat(sprintf("  Uploaded: %s\n", s3_key))
+  }, error = function(e) {
+    cat(sprintf("  Failed: %s — %s\n", basename(f), conditionMessage(e)))
+  })
+}
+
 cat("\nDone.\n")
