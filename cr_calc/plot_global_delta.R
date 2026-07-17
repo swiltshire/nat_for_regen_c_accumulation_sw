@@ -14,6 +14,15 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
+# Ocean polygon to mask raster values over water
+land  <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") |>
+  sf::st_union()
+ocean <- sf::st_difference(
+  sf::st_as_sfc(sf::st_bbox(c(xmin = -180, ymin = -90, xmax = 180, ymax = 90),
+                             crs = sf::st_crs(4326))),
+  land
+)
+
 # Ordered A -> K -> B top to bottom
 param_config <- list(
   A = list(
@@ -68,6 +77,7 @@ panels <- imap(param_config, function(cfg, param_name) {
 
   ggplot() +
     geom_spatraster(data = delta, maxcell = 5e6) +
+    geom_sf(data = ocean, fill = "white", colour = NA) +
     geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
     scale_fill_gradient2(
       name     = cfg$label,
