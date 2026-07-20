@@ -75,12 +75,16 @@ panels <- imap(param_config, function(cfg, param_name) {
   # Symmetric limits for diverging scale
   abs_max <- max(abs(qlims))
 
-  # Downsample explicitly — geom_spatraster's maxcell can miss tile rows
+  # Downsample, then convert to a data frame and plot with geom_raster.
+  # geom_spatraster mis-renders these large multi-tile mosaics (only one
+  # tile row shows); going through a data frame uses a reliable path.
   agg_factor <- max(1, round(ncell(delta) / 5e6))
   if (agg_factor > 1) delta_plot <- aggregate(delta, fact = ceiling(sqrt(agg_factor)), fun = "mean", na.rm = TRUE) else delta_plot <- delta
+  df <- as.data.frame(delta_plot, xy = TRUE, na.rm = TRUE)
+  names(df)[3] <- "value"
 
   ggplot() +
-    geom_spatraster(data = delta_plot) +
+    geom_raster(data = df, aes(x = x, y = y, fill = value)) +
     geom_sf(data = ocean, fill = "white", colour = NA) +
     geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
     scale_fill_gradient2(

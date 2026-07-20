@@ -80,12 +80,16 @@ for (param_name in names(param_config)) {
   # Build one panel per target band
   panels <- imap(target_bands, function(band_idx, band_name) {
     lyr <- r[[band_idx]]
-    # Downsample explicitly — geom_spatraster's maxcell can miss tile rows
+    # Downsample, then convert to a data frame and plot with geom_raster.
+    # geom_spatraster mis-renders these large multi-tile mosaics (only one
+    # tile row shows); going through a data frame uses a reliable path.
     agg_factor <- max(1, round(ncell(lyr) / 5e6))
     if (agg_factor > 1) lyr <- aggregate(lyr, fact = ceiling(sqrt(agg_factor)), fun = "mean", na.rm = TRUE)
+    df <- as.data.frame(lyr, xy = TRUE, na.rm = TRUE)
+    names(df)[3] <- "value"
 
     ggplot() +
-      geom_spatraster(data = lyr) +
+      geom_raster(data = df, aes(x = x, y = y, fill = value)) +
       geom_sf(data = ocean, fill = "white", colour = NA) +
       geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
       scale_fill_gradient(
