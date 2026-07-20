@@ -65,6 +65,9 @@ panels <- imap(param_config, function(cfg, param_name) {
   r <- rast(cfg$file)
   delta <- r[[18]] - r[[1]]
 
+  # Mask non-data pixels (ocean/non-forest stored as 0)
+  delta[r[[1]] == 0 & r[[18]] == 0] <- NA
+
   # Save delta GeoTIFF
   delta_path <- file.path(delta_dir, paste0(param_name, "_delta.tif"))
   writeRaster(delta, delta_path, overwrite = TRUE)
