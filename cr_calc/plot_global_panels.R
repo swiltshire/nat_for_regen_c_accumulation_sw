@@ -73,19 +73,13 @@ for (param_name in names(param_config)) {
 
   r <- rast(cfg$file)
 
-  # Mask non-data pixels (ocean/non-forest stored as 0) so they render as white
-  # and don't compress the colour scale
-  r_masked <- r[[1]]
-  r_masked[r_masked == 0] <- NA
-
-  # Compute shared colour limits from land-only values
-  qlims <- global(r_masked, fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
+  # Compute shared colour limits from band 1 (fast: sample-based)
+  qlims <- global(r[[1]], fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
   qlims <- as.numeric(qlims)
 
   # Build one panel per target band
   panels <- imap(target_bands, function(band_idx, band_name) {
     lyr <- r[[band_idx]]
-    lyr[lyr == 0] <- NA
 
     ggplot() +
       geom_spatraster(data = lyr, maxcell = 5e6) +
