@@ -75,8 +75,12 @@ panels <- imap(param_config, function(cfg, param_name) {
   # Symmetric limits for diverging scale
   abs_max <- max(abs(qlims))
 
+  # Downsample explicitly — geom_spatraster's maxcell can miss tile rows
+  agg_factor <- max(1, round(ncell(delta) / 5e6))
+  if (agg_factor > 1) delta_plot <- aggregate(delta, fact = ceiling(sqrt(agg_factor)), fun = "mean", na.rm = TRUE) else delta_plot <- delta
+
   ggplot() +
-    geom_spatraster(data = delta, maxcell = 5e6) +
+    geom_spatraster(data = delta_plot) +
     geom_sf(data = ocean, fill = "white", colour = NA) +
     geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
     scale_fill_gradient2(
