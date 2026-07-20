@@ -21,6 +21,7 @@ cr_calc/
   cr_chapman_richards_wrapper.R    # Launches fitting as standalone Rscript
   cr_interpolate_params.Rmd        # Interpolate A,B,K between hist and future
   cr_interpolate_params_wrapper.R  # Launches interpolation as standalone Rscript
+  cr_mask_nonforest.R              # Apply forest footprint (A>0) as NA mask; re-mosaic
   plot_global_panels.R             # 3-panel maps of A, K, B at 2005/2050/2090
   plot_global_delta.R              # Delta maps (2090 − 2005) for A, K, B
 setup/
@@ -125,6 +126,39 @@ Outputs: 18-band GeoTIFFs in `data/outputs/interpolated/{A,B,K}/` (per-tile)
 and `data/outputs/interpolated/mosaic/{A,B,K}_global.tif` (mosaicked global),
 with bands `yr_2005` through `yr_2090` at 5-year intervals. Completes in
 seconds per tile (pure raster algebra); mosaic step runs after all tiles finish.
+
+### Apply non-forest mask (after interpolation)
+
+The interpolated products code non-forest / nodata cells (ocean, desert,
+barren, water) as `0`. Because A is *maximum potential carbon density*,
+`A == 0` in the yr_2005 baseline is the natural definition of "no forest here".
+`cr_mask_nonforest.R` builds one footprint from A and sets those cells to `NA`
+across **A, B, and K alike** — using A rather than each parameter's own zeros
+avoids blanking valid `B == 0` cells (B is a shape parameter for which 0 can be
+a legitimate fit).
+
+The unmasked originals are copied to `data/outputs/interpolated_unmasked/`
+first (backups are written only once and never overwritten with masked data),
+then tiles are masked in place in parallel (one work unit per tile, temp file +
+atomic rename) and the global mosaics are rebuilt from the masked tiles. If a
+run fails, the unmasked originals can be restored from the backup directory.
+The step is idempotent — re-running on already-masked tiles is a no-op.
+
+Launch from the terminal (a plain `Rscript`, so `mclapply` forks safely without
+a wrapper):
+
+```bash
+cd /home/sagemaker-user/nat_for_regen_c_accumulation_sw
+nohup Rscript cr_calc/cr_mask_nonforest.R > mask_wrapper.log 2>&1 &
+tail -f data/outputs/interpolated/progress_mask.log
+```
+
+Overwrites the per-tile GeoTIFFs and the `{A,B,K}_global.tif` mosaics with
+masked versions (`NA` outside the forest footprint) and re-syncs them to S3;
+unmasked copies are retained in `data/outputs/interpolated_unmasked/`. Because
+the masked mosaics keep the canonical `interpolated/mosaic/` paths, the plotting
+scripts (`plot_global_panels.R`, `plot_global_delta.R`) use the masked products
+automatically.
 
 ### Data pipeline
 

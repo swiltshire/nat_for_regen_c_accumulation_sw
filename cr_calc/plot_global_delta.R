@@ -14,14 +14,14 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
-# Land polygon (SpatVector) used to mask ocean cells to NA before plotting.
-# Do NOT build an ocean polygon via st_difference on a global bbox: under s2
-# spherical geometry that produces a malformed polygon that, filled white,
-# whites out most of the map and leaves only a northern stripe. Masking the
-# raster with terra is reliable.
-land_vect <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") |>
-  sf::st_union() |>
-  terra::vect()
+# Forest footprint mask (full resolution).
+# A is maximum potential carbon density, so A == 0 (yr_2005 baseline) marks
+# non-forest / nodata cells (also how ocean is coded). Apply this one footprint
+# to the A, B, and K deltas. Using A — not each parameter's own zeros — avoids
+# blanking valid B == 0 cells. The A footprint also removes ocean for free, so
+# no rnaturalearth land polygon (or fragile s2 st_difference ocean) is needed.
+a_base <- rast(file.path(mosaic_dir, "A_global.tif"))[[1]]
+a_base <- terra::classify(a_base, cbind(0, NA))            # NA where non-forest
 
 # Ordered A -> K -> B top to bottom
 param_config <- list(
@@ -64,9 +64,10 @@ panels <- imap(param_config, function(cfg, param_name) {
   cat(sprintf("Computing delta for %s...\n", param_name))
   r <- rast(cfg$file)
   delta <- r[[18]] - r[[1]]
-  # Ocean cells are 0-valued in the mosaics; mask to NA so they render white
-  # and are excluded from the colour-scale quantiles below.
-  delta <- terra::mask(delta, land_vect)
+  # Restrict to the forest footprint (A > 0 in yr_2005). This drops non-forest
+  # so it isn't shown as spurious "no change" and doesn't bias the quantiles
+  # below, while preserving genuine zero-change forest cells (delta == 0).
+  delta <- terra::mask(delta, a_base)
 
   # Save delta GeoTIFF
   delta_path <- file.path(delta_dir, paste0(param_name, "_delta.tif"))

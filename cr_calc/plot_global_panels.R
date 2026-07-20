@@ -14,14 +14,27 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
-# Land polygon (SpatVector) used to mask ocean cells to NA before plotting.
+# Forest footprint mask.
+# A is maximum potential carbon density, so A == 0 (in the yr_2005 baseline)
+# marks non-forest / nodata cells (this is also how ocean is coded). Build one
+# footprint from A and apply it to A, B, and K alike. Using A — rather than
+# each parameter's own zeros — avoids blanking valid B == 0 cells (B is a
+# shape parameter for which 0 can be a legitimate fit).
+#
+# The mask is built and applied at the aggregated render resolution below.
 # Do NOT build an ocean polygon via st_difference on a global bbox: under s2
-# spherical geometry that produces a malformed polygon that, filled white,
-# whites out most of the map and leaves only a northern stripe. Masking the
-# raster with terra is reliable.
-land_vect <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") |>
-  sf::st_union() |>
-  terra::vect()
+# spherical geometry that yields a malformed polygon that whites out most of
+# the map. The A footprint removes ocean for free (ocean is A == 0).
+agg_factor    <- max(1, round(ncell(rast(file.path(mosaic_dir, "A_global.tif"))) / 5e6))
+agg_fact_side <- ceiling(sqrt(agg_factor))
+
+a_base <- rast(file.path(mosaic_dir, "A_global.tif"))[[1]]
+a_base <- terra::classify(a_base, cbind(0, NA))            # NA where non-forest
+a_mask <- if (agg_factor > 1) {
+  aggregate(a_base, fact = agg_fact_side, fun = "mean", na.rm = TRUE)
+} else {
+  a_base
+}
 
 # Band indices: yr_2005 = 1, yr_2050 = 10, yr_2090 = 18
 target_bands <- c(yr_2005 = 1, yr_2050 = 10, yr_2090 = 18)
@@ -73,18 +86,20 @@ for (param_name in names(param_config)) {
 
   r <- rast(cfg$file)
 
-  # Compute shared colour limits from band 1 (fast: sample-based)
-  qlims <- global(r[[1]], fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
+  # Shared colour limits from band 1, over the forest footprint only so
+  # non-forest zeros don't drag the lower limit to 0.
+  qlims <- global(terra::mask(r[[1]], a_base), fun = quantile,
+                  probs = c(0.01, 0.99), na.rm = TRUE)
   qlims <- as.numeric(qlims)
 
   # Build one panel per target band
   panels <- imap(target_bands, function(band_idx, band_name) {
     lyr <- r[[band_idx]]
-    # Downsample, mask ocean to NA, then plot the data frame with geom_raster.
-    agg_factor <- max(1, round(ncell(lyr) / 5e6))
-    if (agg_factor > 1) lyr <- aggregate(lyr, fact = ceiling(sqrt(agg_factor)), fun = "mean", na.rm = TRUE)
-    # Ocean cells are 0-valued in the mosaics; mask to NA so they render white.
-    lyr <- terra::mask(lyr, land_vect)
+    # Downsample, then restrict to the forest footprint (A > 0 in yr_2005).
+    # Aggregating first then masking keeps geometry aligned with a_mask and
+    # avoids blending non-forest zeros into the mean across the sub-Arctic.
+    if (agg_factor > 1) lyr <- aggregate(lyr, fact = agg_fact_side, fun = "mean", na.rm = TRUE)
+    lyr <- terra::mask(lyr, a_mask)
     df <- as.data.frame(lyr, xy = TRUE, na.rm = TRUE)
     names(df)[3] <- "value"
 
