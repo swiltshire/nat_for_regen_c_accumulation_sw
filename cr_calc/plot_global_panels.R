@@ -14,14 +14,14 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
-# Ocean polygon to mask raster values over water
-land  <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") |>
-  sf::st_union()
-ocean <- sf::st_difference(
-  sf::st_as_sfc(sf::st_bbox(c(xmin = -180, ymin = -90, xmax = 180, ymax = 90),
-                             crs = sf::st_crs(4326))),
-  land
-)
+# Land polygon (SpatVector) used to mask ocean cells to NA before plotting.
+# Do NOT build an ocean polygon via st_difference on a global bbox: under s2
+# spherical geometry that produces a malformed polygon that, filled white,
+# whites out most of the map and leaves only a northern stripe. Masking the
+# raster with terra is reliable.
+land_vect <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf") |>
+  sf::st_union() |>
+  terra::vect()
 
 # Band indices: yr_2005 = 1, yr_2050 = 10, yr_2090 = 18
 target_bands <- c(yr_2005 = 1, yr_2050 = 10, yr_2090 = 18)
@@ -80,17 +80,16 @@ for (param_name in names(param_config)) {
   # Build one panel per target band
   panels <- imap(target_bands, function(band_idx, band_name) {
     lyr <- r[[band_idx]]
-    # Downsample, then convert to a data frame and plot with geom_raster.
-    # geom_spatraster mis-renders these large multi-tile mosaics (only one
-    # tile row shows); going through a data frame uses a reliable path.
+    # Downsample, mask ocean to NA, then plot the data frame with geom_raster.
     agg_factor <- max(1, round(ncell(lyr) / 5e6))
     if (agg_factor > 1) lyr <- aggregate(lyr, fact = ceiling(sqrt(agg_factor)), fun = "mean", na.rm = TRUE)
+    # Ocean cells are 0-valued in the mosaics; mask to NA so they render white.
+    lyr <- terra::mask(lyr, land_vect)
     df <- as.data.frame(lyr, xy = TRUE, na.rm = TRUE)
     names(df)[3] <- "value"
 
     ggplot() +
       geom_raster(data = df, aes(x = x, y = y, fill = value)) +
-      geom_sf(data = ocean, fill = "white", colour = NA) +
       geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
       scale_fill_gradient(
         name     = cfg$label,
