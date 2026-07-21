@@ -185,6 +185,18 @@ if (any(is_err)) {
 if (rebuild_mosaic) {
   dir.create(mosaic_dir, recursive = TRUE, showWarnings = FALSE)
 
+  # Force block-wise streaming to disk for the mosaic writes. Without this, the
+  # large memmax above lets terra build each global mosaic entirely in memory,
+  # which is slow to flush and an OOM risk (no swap). Streaming makes the output
+  # file grow steadily instead.
+  terraOptions(todisk = TRUE)
+
+  # Multithreaded, float-friendly GeoTIFF creation options. NUM_THREADS spreads
+  # DEFLATE compression across all cores; PREDICTOR=3 is the floating-point
+  # predictor (drop it if any product is integer-coded).
+  mosaic_gdal <- c("COMPRESS=DEFLATE", "PREDICTOR=3", "ZLEVEL=6",
+                   "TILED=YES", "NUM_THREADS=ALL_CPUS", "BIGTIFF=YES")
+
   for (param in params) {
     out_path <- file.path(mosaic_dir, sprintf("%s_global.tif", param))
 
@@ -202,10 +214,12 @@ if (rebuild_mosaic) {
     v <- vrt(ptiles, filename = vrt_path, overwrite = TRUE)
     names(v) <- band_names
 
-    writeRaster(v, out_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+    # Clear any stale/0-byte output so a failed write can't masquerade as valid.
+    if (file.exists(out_path)) unlink(out_path)
+    writeRaster(v, out_path, gdal = mosaic_gdal, overwrite = TRUE)
 
-    cat(sprintf("done (%.1f sec) -> %s\n",
-                as.numeric(difftime(Sys.time(), t0, units = "secs")),
+    cat(sprintf("done (%.1f min) -> %s\n",
+                as.numeric(difftime(Sys.time(), t0, units = "mins")),
                 basename(out_path)))
   }
   cat(sprintf("Masked mosaics written to %s\n", mosaic_dir))
