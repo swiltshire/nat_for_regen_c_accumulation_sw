@@ -85,7 +85,7 @@ for (i in seq_len(nrow(mosaic_files))) {
   cat(sprintf("    Extent     : %.2f, %.2f, %.2f, %.2f (xmin, xmax, ymin, ymax)\n",
               ext(r)[1], ext(r)[2], ext(r)[3], ext(r)[4]))
 
-  # Sample stats from band 1 (yr_000) and band 10 (yr_090)
+  # Sample stats from band 1 (yr_2005) and the last band (yr_2090)
   for (b in c(1, nlyr(r))) {
     vals <- values(r[[b]], na.rm = TRUE)
     n_valid <- sum(!is.na(vals))
@@ -98,7 +98,7 @@ for (i in seq_len(nrow(mosaic_files))) {
 
 # --- 4. Visualize global mosaics (band 1 = yr_000) ---
 
-cat("\nPlotting global mosaics (band 1 = yr_000)...\n")
+cat("\nPlotting global mosaics (band 1 = yr_2005)...\n")
 
 png("data/outputs/validation_mosaics.png", width = 2400, height = 2400, res = 200)
 par(mfrow = c(3, 1), mar = c(2, 2, 3, 1))
@@ -111,7 +111,7 @@ for (i in seq_len(nrow(mosaic_files))) {
     next
   }
   r <- rast(f)[[1]]
-  plot(r, main = paste0(mosaic_files$param[i], "_global — Band 1 (yr_000)"),
+  plot(r, main = paste0(mosaic_files$param[i], "_global — Band 1 (yr_2005)"),
        col = hcl.colors(100, "viridis"), maxcell = 5e6)
 }
 dev.off()

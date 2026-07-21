@@ -337,8 +337,9 @@ First validates that all expected tiles are present and have the correct band
 count — aborts with an error if any are missing or corrupt, so the mosaic is
 never built from incomplete data. Uses `terra::vrt()` to build a GDAL Virtual
 Raster (lightweight XML pointer) rather than loading all tiles into memory.
-`writeRaster()` then streams from the VRT to disk in chunks, keeping RAM usage
-low even for large global mosaics.
+`writeRaster()` then streams from the VRT to disk — but terra only streams when
+`memmax` is capped, so the loop caps it low (a large `memmax` makes terra buffer
+the whole raster in RAM) and writes with multithreaded DEFLATE.
 
 ```{r mosaic}
 if (test_mode) {
@@ -374,13 +375,23 @@ if (test_mode) {
   mosaic_dir <- file.path(output_dir, "mosaic")
   dir.create(mosaic_dir, recursive = TRUE, showWarnings = FALSE)
 
+  # Cap memmax so terra streams the mosaic to disk in blocks. The large memmax
+  # set for interpolation would otherwise make terra buffer the entire global
+  # raster in RAM and flush only at the end. Multithreaded DEFLATE + a float
+  # predictor keep the write fast.
+  terraOptions(memmax = 8)
+  mosaic_gdal <- c("COMPRESS=DEFLATE", "PREDICTOR=3", "ZLEVEL=6",
+                   "TILED=YES", "NUM_THREADS=ALL_CPUS", "BIGTIFF=YES")
+
   for (param in params) {
     tile_files <- list.files(file.path(output_dir, param),
                              pattern = "\\.tif$", full.names = TRUE)
+    # Clear any stale/0-byte output so a failed write can't masquerade as valid.
+    if (file.exists(out_path)) unlink(out_path)
+    writeRaster(v, out_path, gdal = mosaic_gdal, overwrite = TRUE)
 
-    cat(sprintf("  %s: building VRT from %d tiles ... ", param, length(tile_files)))
-    t0 <- Sys.time()
-
+    elapsed <- round(difftime(Sys.time(), t0, units = "mins"), 1)
+    cat(sprintf("done (%s min) -> %s\n", elapsed, basename(out_path)))
     vrt_path <- file.path(mosaic_dir, sprintf("%s_global.vrt", param))
     v <- vrt(tile_files, filename = vrt_path, overwrite = TRUE)
     names(v) <- band_names

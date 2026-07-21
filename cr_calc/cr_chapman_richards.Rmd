@@ -719,6 +719,12 @@ a single global raster for each parameter. Skip this section if you intend to
 mosaic in a separate step or in GEE.
 
 ```{r mosaic, eval=FALSE}
+# Cap memmax so terra streams each mosaic to disk in blocks rather than
+# buffering the whole global raster in RAM; multithreaded DEFLATE keeps it fast.
+terraOptions(memmax = 8)
+mosaic_gdal <- c("COMPRESS=DEFLATE", "PREDICTOR=3", "ZLEVEL=6",
+                 "TILED=YES", "NUM_THREADS=ALL_CPUS", "BIGTIFF=YES")
+
 for (scn in scenarios) {
   out_dir    <- file.path(project_root, "data", "outputs", scn)
   mosaic_dir <- file.path(out_dir, "mosaic")
@@ -728,10 +734,12 @@ for (scn in scenarios) {
     tile_files <- list.files(file.path(out_dir, param),
                               pattern = "\\.tif$", full.names = TRUE)
     if (length(tile_files) == 0) next
-    tile_rasts  <- lapply(tile_files, rast)
-    mosaic_rast <- do.call(mosaic, c(tile_rasts, list(fun = "mean")))
-    out_mosaic  <- file.path(mosaic_dir, sprintf("%s_%s_global.tif", param, scn))
-    writeRaster(mosaic_rast, out_mosaic, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+
+    # vrt() is a lightweight pointer to the tiles; writeRaster streams from it.
+    v          <- vrt(tile_files)
+    out_mosaic <- file.path(mosaic_dir, sprintf("%s_%s_global.tif", param, scn))
+    if (file.exists(out_mosaic)) unlink(out_mosaic)
+    writeRaster(v, out_mosaic, gdal = mosaic_gdal, overwrite = TRUE)
     message(sprintf("Wrote: %s", out_mosaic))
   }
 }
