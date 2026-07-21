@@ -105,7 +105,11 @@ panels <- imap(param_config, function(cfg, param_name) {
     base_theme
 })
 
-p <- wrap_plots(panels, ncol = 1)
+p <- wrap_plots(panels, ncol = 1) +
+  plot_annotation(
+    title = "Change in Chapman-Richards parameters, 2005 to 2090",
+    theme = theme(plot.title = element_text(size = 13, face = "bold", hjust = 0.5))
+  )
 
 out_path <- file.path(out_dir, "delta_yr2090_yr2005.png")
 ggsave(out_path, p, width = 190, height = 240, units = "mm", dpi = 300)
