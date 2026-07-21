@@ -8,20 +8,22 @@ library(tidyverse)
 library(patchwork)
 library(sf)
 
+# Cap terra memory so full-resolution reads (global/aggregate below) stream in
+# blocks rather than buffering an entire global raster in RAM.
+terraOptions(memmax = 8)
+
 mosaic_dir <- "data/outputs/interpolated/mosaic"
 out_dir    <- "data/outputs/figures"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 
-# Forest footprint mask (full resolution).
-# A is maximum potential carbon density, so A == 0 (yr_2005 baseline) marks
-# non-forest / nodata cells (also how ocean is coded). Apply this one footprint
-# to the A, B, and K deltas. Using A — not each parameter's own zeros — avoids
-# blanking valid B == 0 cells. The A footprint also removes ocean for free, so
-# no rnaturalearth land polygon (or fragile s2 st_difference ocean) is needed.
-a_base <- rast(file.path(mosaic_dir, "A_global.tif"))[[1]]
-a_base <- terra::classify(a_base, cbind(0, NA))            # NA where non-forest
+# The forest footprint is already baked into the mosaics: the masking step set
+# non-forest / ocean cells (A == 0 in the yr_2005 baseline) to NA across A, B,
+# and K. Deltas therefore inherit NA where non-forest, so no re-masking is
+# needed and genuine zero-change forest cells (delta == 0) are preserved. The
+# baked-in NA footprint also removes ocean for free, so no rnaturalearth land
+# polygon (or fragile s2 st_difference ocean) is required.
 
 # Ordered A -> K -> B top to bottom
 param_config <- list(
@@ -63,15 +65,13 @@ dir.create(delta_dir, recursive = TRUE, showWarnings = FALSE)
 panels <- imap(param_config, function(cfg, param_name) {
   cat(sprintf("Computing delta for %s...\n", param_name))
   r <- rast(cfg$file)
+  # Non-forest is already NA in both bands, so the delta is NA off the forest
+  # footprint automatically.
   delta <- r[[18]] - r[[1]]
-  # Restrict to the forest footprint (A > 0 in yr_2005). This drops non-forest
-  # so it isn't shown as spurious "no change" and doesn't bias the quantiles
-  # below, while preserving genuine zero-change forest cells (delta == 0).
-  delta <- terra::mask(delta, a_base)
 
-  # Save delta GeoTIFF
+  # Save delta GeoTIFF (compressed to match the mosaics).
   delta_path <- file.path(delta_dir, paste0(param_name, "_delta.tif"))
-  writeRaster(delta, delta_path, overwrite = TRUE)
+  writeRaster(delta, delta_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
   cat(sprintf("  Saved raster: %s\n", delta_path))
 
   qlims <- global(delta, fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
