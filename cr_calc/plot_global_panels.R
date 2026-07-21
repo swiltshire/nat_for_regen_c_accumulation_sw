@@ -30,6 +30,11 @@ world <- rnaturalearth::ne_coastline(scale = "medium", returnclass = "sf")
 agg_factor    <- max(1, round(ncell(rast(file.path(mosaic_dir, "A_global.tif"))) / 5e6))
 agg_fact_side <- ceiling(sqrt(agg_factor))
 
+# Cache directory for the downsampled render-resolution bands, so re-runs skip
+# re-reading and re-aggregating the full-resolution mosaics.
+panels_cache_dir <- file.path(mosaic_dir, "panels_cache")
+dir.create(panels_cache_dir, recursive = TRUE, showWarnings = FALSE)
+
 # Band indices: yr_2005 = 1, yr_2050 = 10, yr_2090 = 18
 target_bands <- c(yr_2005 = 1, yr_2050 = 10, yr_2090 = 18)
 band_labels  <- c(yr_2005 = "2005", yr_2050 = "2050", yr_2090 = "2090")
@@ -76,22 +81,31 @@ base_theme <- theme_minimal(base_size = 10) +
 
 for (param_name in names(param_config)) {
   cfg <- param_config[[param_name]]
-  cat(sprintf("Processing %s...\n", param_name))
 
-  r <- rast(cfg$file)
+  # Reuse the cached downsampled bands if present; otherwise read the full-res
+  # mosaic, select and aggregate the three target bands, and cache them.
+  cache_path <- file.path(panels_cache_dir, paste0(param_name, "_panels_agg.tif"))
+  if (file.exists(cache_path)) {
+    cat(sprintf("Loading cached bands for %s...\n", param_name))
+    r_agg <- rast(cache_path)
+  } else {
+    cat(sprintf("Processing %s (reading full-res mosaic)...\n", param_name))
+    r_agg <- rast(cfg$file)[[target_bands]]
+    # Downsample for rendering. na.rm = TRUE ignores the baked-in non-forest
+    # NAs, so aggregated means are over forest cells only.
+    if (agg_factor > 1) r_agg <- aggregate(r_agg, fact = agg_fact_side, fun = "mean", na.rm = TRUE)
+    names(r_agg) <- names(target_bands)
+    writeRaster(r_agg, cache_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+  }
 
-  # Shared colour limits from band 1. Non-forest is already NA, so quantiles
-  # reflect forest cells only.
-  qlims <- global(r[[1]], fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
+  # Shared colour limits from the yr_2005 band. Non-forest is already NA, so
+  # quantiles reflect forest cells only.
+  qlims <- global(r_agg[["yr_2005"]], fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
   qlims <- as.numeric(qlims)
 
   # Build one panel per target band
-  panels <- imap(target_bands, function(band_idx, band_name) {
-    lyr <- r[[band_idx]]
-    # Downsample for rendering. na.rm = TRUE ignores the baked-in non-forest
-    # NAs, so aggregated means are over forest cells only.
-    if (agg_factor > 1) lyr <- aggregate(lyr, fact = agg_fact_side, fun = "mean", na.rm = TRUE)
-    df <- as.data.frame(lyr, xy = TRUE, na.rm = TRUE)
+  panels <- imap(band_labels, function(lbl, band_name) {
+    df <- as.data.frame(r_agg[[band_name]], xy = TRUE, na.rm = TRUE)
     names(df)[3] <- "value"
 
     ggplot() +
