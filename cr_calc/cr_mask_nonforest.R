@@ -191,6 +191,11 @@ if (rebuild_mosaic) {
   # file grow steadily instead.
   terraOptions(todisk = TRUE)
 
+  # Cap memmax for the mosaic writes so terra streams in small blocks rather than
+  # reading the whole global raster into memory. The high memmax set above is for
+  # the per-tile masking; the mosaic write needs a low cap to avoid a RAM stall.
+  terraOptions(memmax = 8)
+
   # Multithreaded, float-friendly GeoTIFF creation options. NUM_THREADS spreads
   # DEFLATE compression across all cores; PREDICTOR=3 is the floating-point
   # predictor (drop it if any product is integer-coded).

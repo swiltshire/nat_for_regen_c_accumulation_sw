@@ -36,6 +36,12 @@ s3_prefix  <- "serge-wiltshire/nat_for_regen_c_accumulation_data/interpolated/"
 # so the output file grows steadily.
 terraOptions(todisk = TRUE)
 
+# Cap memmax so terra processes the mosaic in many small blocks and streams to
+# disk. Without this, the default memfrac (~0.6 of RAM) lets terra read the whole
+# raster into memory (~60 GB) and write only at the very end — the stall we hit.
+# memmax is the lever that governs read-block size; todisk alone does not.
+terraOptions(memmax = 8)
+
 # Multithreaded, float-friendly GeoTIFF creation options.
 mosaic_gdal <- c(
   "COMPRESS=DEFLATE",
