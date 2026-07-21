@@ -90,15 +90,19 @@ panels <- imap(param_config, function(cfg, param_name) {
   df <- as.data.frame(delta_plot, xy = TRUE, na.rm = TRUE)
   names(df)[3] <- "value"
 
+  # For B, flip the diverging colours so green is lower and red is higher.
+  div_low  <- if (param_name == "B") "#2e7d32" else "#c62828"
+  div_high <- if (param_name == "B") "#c62828" else "#2e7d32"
+
   ggplot() +
     geom_raster(data = df, aes(x = x, y = y, fill = value)) +
     geom_sf(data = world, colour = "grey30", linewidth = 0.15, fill = NA) +
     scale_fill_gradient2(
       name     = cfg$label,
       breaks   = scales::breaks_pretty(n = 5),
-      low      = "#c62828",
+      low      = div_low,
       mid      = "white",
-      high     = "#2e7d32",
+      high     = div_high,
       midpoint = 0,
       limits   = c(-abs_max, abs_max),
       oob      = scales::squish,
