@@ -63,16 +63,21 @@ delta_dir <- "data/outputs/interpolated/delta"
 dir.create(delta_dir, recursive = TRUE, showWarnings = FALSE)
 
 panels <- imap(param_config, function(cfg, param_name) {
-  cat(sprintf("Computing delta for %s...\n", param_name))
-  r <- rast(cfg$file)
-  # Non-forest is already NA in both bands, so the delta is NA off the forest
-  # footprint automatically.
-  delta <- r[[18]] - r[[1]]
-
-  # Save delta GeoTIFF (compressed to match the mosaics).
+  # Reuse the saved delta GeoTIFF if present; otherwise compute and save it.
   delta_path <- file.path(delta_dir, paste0(param_name, "_delta.tif"))
-  writeRaster(delta, delta_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
-  cat(sprintf("  Saved raster: %s\n", delta_path))
+  if (file.exists(delta_path)) {
+    cat(sprintf("Loading saved delta for %s...\n", param_name))
+    delta <- rast(delta_path)
+  } else {
+    cat(sprintf("Computing delta for %s...\n", param_name))
+    r <- rast(cfg$file)
+    # Non-forest is already NA in both bands, so the delta is NA off the forest
+    # footprint automatically.
+    delta <- r[[18]] - r[[1]]
+    # Save delta GeoTIFF (compressed to match the mosaics).
+    writeRaster(delta, delta_path, gdal = "COMPRESS=DEFLATE", overwrite = TRUE)
+    cat(sprintf("  Saved raster: %s\n", delta_path))
+  }
 
   qlims <- global(delta, fun = quantile, probs = c(0.01, 0.99), na.rm = TRUE)
   qlims <- as.numeric(qlims)
